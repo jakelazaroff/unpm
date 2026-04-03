@@ -15,11 +15,13 @@ import (
 )
 
 const defaultOut = "vendor"
+const defaultRoot = "."
 
 func main() {
 	fetchCmd := flag.NewFlagSet("fetch", flag.ExitOnError)
 	fetchConfig := fetchCmd.String("i", "unpm.json", "path to import map JSON file")
 	fetchOut := fetchCmd.String("o", defaultOut, "output directory")
+	fetchRoot := fetchCmd.String("r", defaultRoot, "root directory for import map paths")
 
 	checkCmd := flag.NewFlagSet("check", flag.ExitOnError)
 	checkConfig := checkCmd.String("i", "unpm.json", "path to import map JSON file")
@@ -47,8 +49,9 @@ func main() {
 			os.Exit(1)
 		}
 		outDir := unpm.OutDir(cfg, *fetchConfig, *fetchOut, defaultOut)
+		root := unpm.Root(cfg, *fetchConfig, *fetchRoot, defaultRoot)
 		fmt.Println("unpm: fetching imports...")
-		if err := unpm.Fetch(cfg, outDir); err != nil {
+		if err := unpm.Fetch(cfg, outDir, root); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}

@@ -26,7 +26,8 @@ type Config struct {
 }
 
 type Options struct {
-	Out string `json:"out,omitempty"`
+	Out  string `json:"out,omitempty"`
+	Root string `json:"root,omitempty"`
 }
 
 type vendorer struct {
@@ -75,35 +76,59 @@ func OutDir(cfg *Config, configPath, flagVal, flagDefault string) string {
 	return flagDefault
 }
 
-func Fetch(cfg *Config, outDir string) error {
+// Root returns the root directory for import map paths. The flag takes precedence
+// if set; otherwise the config's "root" field is used (resolved relative to
+// configPath); otherwise the default (parent of outDir) is returned.
+func Root(cfg *Config, configPath, flagVal, flagDefault string) string {
+	if flagVal != flagDefault {
+		return flagVal
+	}
+	if cfg.Unpm != nil && cfg.Unpm.Root != "" {
+		return filepath.Join(filepath.Dir(configPath), cfg.Unpm.Root)
+	}
+	return flagDefault
+}
+
+func Fetch(cfg *Config, outDir, root string) error {
 	v := &vendorer{
 		outDir:     outDir,
 		downloaded: make(map[string]string),
 		types:      make(map[string]string),
 	}
 
-	rewritten := make(map[string]string)
-
+	// Download all imports; relPath is relative to outDir
+	downloaded := make(map[string]string) // import key -> relPath within outDir
 	for key, url := range cfg.Imports {
 		relPath, err := v.download(url)
 		if err != nil {
 			return fmt.Errorf("downloading %q: %w", key, err)
 		}
-		rewritten[key] = "./" + relPath
+		downloaded[key] = relPath
+	}
+
+	// Compute import map paths relative to root
+	rewritten := make(map[string]string)
+	for key, relPath := range downloaded {
+		absPath := filepath.Join(outDir, filepath.FromSlash(relPath))
+		fromRoot, err := filepath.Rel(root, absPath)
+		if err != nil {
+			return fmt.Errorf("computing relative path for %q: %w", key, err)
+		}
+		rewritten[key] = "./" + filepath.ToSlash(fromRoot)
 	}
 
 	if err := writeImportMap(outDir, rewritten); err != nil {
 		return err
 	}
 
-	// Build types mapping: import key -> types path.
+	// Build types mapping: import key -> types path relative to outDir.
 	// Use x-typescript-types if available, otherwise fall back to the JS file itself.
 	typesMap := make(map[string]string)
 	for key, url := range cfg.Imports {
 		if typesRel, ok := v.types[url]; ok {
 			typesMap[key] = "./" + typesRel
 		} else {
-			typesMap[key] = rewritten[key]
+			typesMap[key] = "./" + downloaded[key]
 		}
 	}
 
@@ -308,7 +333,7 @@ func resolveVendorPath(rawURL, outDir string) (string, error) {
 
 	ext := strings.ToLower(path.Ext(u.Path))
 	switch ext {
-	case ".js", ".mjs", ".css", ".json", ".wasm":
+	case ".js", ".mjs", ".mts", ".ts", ".css", ".json", ".wasm":
 		return filepath.ToSlash(filepath.Join(u.Host, filepath.FromSlash(u.Path))), nil
 	}
 
@@ -419,7 +444,7 @@ func (v *vendorer) download(rawURL string) (string, error) {
 	var localDir, filename string
 	ext := strings.ToLower(path.Ext(u.Path))
 	switch ext {
-	case ".js", ".mjs", ".css", ".json", ".wasm", ".ts", ".d.ts":
+	case ".js", ".mjs", ".mts", ".ts", ".css", ".json", ".wasm":
 		localDir = path.Join(u.Host, path.Dir(u.Path))
 		filename = path.Base(u.Path)
 	default:
@@ -432,7 +457,7 @@ func (v *vendorer) download(rawURL string) (string, error) {
 		}
 		fext := strings.ToLower(path.Ext(filename))
 		switch fext {
-		case ".js", ".mjs", ".css", ".json", ".wasm", ".ts":
+		case ".js", ".mjs", ".mts", ".ts", ".css", ".json", ".wasm":
 			// keep as-is
 		default:
 			filename += ".js"
