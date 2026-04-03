@@ -261,10 +261,10 @@ func findImportChain(outDir, start, target string) []string {
 }
 
 // relImportRe matches import/export statements with relative path specifiers.
-var relImportRe = regexp.MustCompile(`(?:import|export)\s+(?:[^"']*\s+from\s+|)["'](\.[^"']+)["']`)
+var relImportRe = regexp.MustCompile(`\b(?:import|export)\s*(?:[^"']*\bfrom\s*|)["'](\.[^"']+)["']`)
 
 // allImportRe matches all import/export specifiers.
-var allImportRe = regexp.MustCompile(`(?:import|export)\s+(?:[^"']*\s+from\s+|)["']([^"']+)["']`)
+var allImportRe = regexp.MustCompile(`\b(?:import|export)\s*(?:[^"']*\bfrom\s*|)["']([^"']+)["']`)
 
 func Prune(cfg *Config, outDir string) error {
 	// Walk the import graph from entry points to find all reachable files.
@@ -411,7 +411,7 @@ func removeEmptyDirs(root string) error {
 
 // importRe matches import/export statements with origin-relative or relative path specifiers.
 // Captures the full statement prefix (group 1), the quote char (group 2), and the path (group 3).
-var importRe = regexp.MustCompile(`((?:import|export)\s+(?:[^"']*\s+from\s+|))(["'])((?:/|\.\.?/)[^"']+)(["'])`)
+var importRe = regexp.MustCompile(`(\b(?:import|export)\s*(?:[^"']*\bfrom\s*|))(["'])((?:/|\.\.?/)[^"']+)(["'])`)
 
 func (v *vendorer) download(rawURL string) (string, error) {
 	// Bare paths like "/preact@10.19.3/..." are not supported at the top level;
@@ -529,13 +529,9 @@ func (v *vendorer) rewriteImports(content, currentFileRel, currentURL string) (s
 		if strings.HasPrefix(impPath, "/") {
 			// Origin-relative path
 			depURL = origin + impPath
-		} else if strings.HasSuffix(currentURL, ".ts") {
-			// Relative path in a .d.ts file — resolve against the current file's URL
-			// to download type dependencies that aren't fetched via x-typescript-types
-			depURL = origin + path.Join(path.Dir(u.Path), impPath)
 		} else {
-			// Relative path in a JS file — already points to a local vendored file
-			return match
+			// Relative path — resolve against the current file's URL
+			depURL = origin + path.Join(path.Dir(u.Path), impPath)
 		}
 
 		depRel, err := v.download(depURL)
