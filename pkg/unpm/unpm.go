@@ -187,7 +187,7 @@ func checkBareImports(outDir string, imports map[string]string) {
 	}
 
 	for spec, files := range missing {
-		fmt.Printf("  warning: %q is imported by %s but missing from import map\n", spec, strings.Join(files, ", "))
+		fmt.Printf("  \033[33mwarning:\033[0m %q is imported by %s but missing from import map\n", spec, strings.Join(files, ", "))
 	}
 }
 
@@ -333,7 +333,7 @@ func resolveVendorPath(rawURL, outDir string) (string, error) {
 
 	ext := strings.ToLower(path.Ext(u.Path))
 	switch ext {
-	case ".js", ".mjs", ".mts", ".ts", ".css", ".json", ".wasm":
+	case ".js", ".mjs", ".mts", ".ts", ".css", ".json", ".wasm", ".map":
 		return filepath.ToSlash(filepath.Join(u.Host, filepath.FromSlash(u.Path))), nil
 	}
 
@@ -413,6 +413,9 @@ func removeEmptyDirs(root string) error {
 // Captures the full statement prefix (group 1), the quote char (group 2), and the path (group 3).
 var importRe = regexp.MustCompile(`(\b(?:import|export)\s*(?:[^"']*\bfrom\s*|))(["'])((?:/|\.\.?/)[^"']+)(["'])`)
 
+// sourceMappingRe matches //# sourceMappingURL=... comments.
+var sourceMappingRe = regexp.MustCompile(`(//[#@]\s*sourceMappingURL\s*=\s*)(\S+)`)
+
 func (v *vendorer) download(rawURL string) (string, error) {
 	// Bare paths like "/preact@10.19.3/..." are not supported at the top level;
 	// they are resolved to full URLs by rewriteImports before calling download.
@@ -444,7 +447,7 @@ func (v *vendorer) download(rawURL string) (string, error) {
 	var localDir, filename string
 	ext := strings.ToLower(path.Ext(u.Path))
 	switch ext {
-	case ".js", ".mjs", ".mts", ".ts", ".css", ".json", ".wasm":
+	case ".js", ".mjs", ".mts", ".ts", ".css", ".json", ".wasm", ".map":
 		localDir = path.Join(u.Host, path.Dir(u.Path))
 		filename = path.Base(u.Path)
 	default:
@@ -457,7 +460,7 @@ func (v *vendorer) download(rawURL string) (string, error) {
 		}
 		fext := strings.ToLower(path.Ext(filename))
 		switch fext {
-		case ".js", ".mjs", ".mts", ".ts", ".css", ".json", ".wasm":
+		case ".js", ".mjs", ".mts", ".ts", ".css", ".json", ".wasm", ".map":
 			// keep as-is
 		default:
 			filename += ".js"
@@ -481,11 +484,18 @@ func (v *vendorer) download(rawURL string) (string, error) {
 		return "", fmt.Errorf("reading %s: %w", fullURL, err)
 	}
 
-	// Find and recursively download origin-relative and relative imports, rewriting paths
 	content := string(body)
-	content, err = v.rewriteImports(content, rel, fullURL)
-	if err != nil {
-		return "", fmt.Errorf("rewriting imports in %s: %w", fullURL, err)
+
+	// Only rewrite imports and source maps in code files, not in .map files
+	if strings.ToLower(path.Ext(u.Path)) != ".map" {
+		// Find and recursively download origin-relative and relative imports, rewriting paths
+		content, err = v.rewriteImports(content, rel, fullURL)
+		if err != nil {
+			return "", fmt.Errorf("rewriting imports in %s: %w", fullURL, err)
+		}
+
+		// Download source maps referenced by //# sourceMappingURL=...
+		content = v.rewriteSourceMap(content, rel, fullURL)
 	}
 
 	if err := os.WriteFile(destPath, []byte(content), 0o644); err != nil {
@@ -500,7 +510,7 @@ func (v *vendorer) download(rawURL string) (string, error) {
 			typesURL = u.Scheme + "://" + u.Host + typesURL
 		}
 		if typesRel, err := v.download(typesURL); err != nil {
-			fmt.Printf("  warning: failed to download types for %s: %v\n", fullURL, err)
+			fmt.Printf("  \033[33mwarning:\033[0m failed to download types for %s: %v\n", fullURL, err)
 		} else {
 			v.types[fullURL] = typesRel
 		}
@@ -551,6 +561,44 @@ func (v *vendorer) rewriteImports(content, currentFileRel, currentURL string) (s
 	})
 
 	return result, rewriteErr
+}
+
+func (v *vendorer) rewriteSourceMap(content, currentFileRel, currentURL string) string {
+	currentDir := path.Dir(currentFileRel)
+	u, _ := url.Parse(currentURL)
+	origin := u.Scheme + "://" + u.Host
+
+	return sourceMappingRe.ReplaceAllStringFunc(content, func(match string) string {
+		groups := sourceMappingRe.FindStringSubmatch(match)
+		prefix := groups[1]
+		mapPath := groups[2]
+
+		// Skip data: URLs
+		if strings.HasPrefix(mapPath, "data:") {
+			return match
+		}
+
+		var mapURL string
+		if strings.HasPrefix(mapPath, "/") {
+			mapURL = origin + mapPath
+		} else {
+			mapURL = origin + path.Join(path.Dir(u.Path), mapPath)
+		}
+
+		mapRel, err := v.download(mapURL)
+		if err != nil {
+			fmt.Printf("  \033[33mwarning:\033[0m failed to download source map %s: %v\n", mapURL, err)
+			return match
+		}
+
+		relFromHere, _ := filepath.Rel(currentDir, mapRel)
+		relFromHere = filepath.ToSlash(relFromHere)
+		if !strings.HasPrefix(relFromHere, ".") {
+			relFromHere = "./" + relFromHere
+		}
+
+		return prefix + relFromHere
+	})
 }
 
 func writeImportMap(outDir string, rewritten map[string]string) error {
