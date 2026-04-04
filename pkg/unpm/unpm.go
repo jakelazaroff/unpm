@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 //
-// Copyright (c) 2026 Jake Lazaroff
+// Copyright (c) 2026 Jake Lazaroff https://github.com/jakelazaroff/unpm
 
 package unpm
 
@@ -106,7 +106,7 @@ func Fetch(cfg *Config, outDir, root string) error {
 		downloaded[key] = relPath
 	}
 
-	// Compute import map paths relative to root
+	// Compute absolute import map paths from root
 	rewritten := make(map[string]string)
 	for key, relPath := range downloaded {
 		absPath := filepath.Join(outDir, filepath.FromSlash(relPath))
@@ -114,7 +114,7 @@ func Fetch(cfg *Config, outDir, root string) error {
 		if err != nil {
 			return fmt.Errorf("computing relative path for %q: %w", key, err)
 		}
-		rewritten[key] = "./" + filepath.ToSlash(fromRoot)
+		rewritten[key] = "/" + filepath.ToSlash(fromRoot)
 	}
 
 	if err := writeImportMap(outDir, rewritten); err != nil {
