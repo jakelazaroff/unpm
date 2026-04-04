@@ -26,8 +26,9 @@ type Config struct {
 }
 
 type Options struct {
-	Out  string `json:"out,omitempty"`
-	Root string `json:"root,omitempty"`
+	Out  string   `json:"out,omitempty"`
+	Root string   `json:"root,omitempty"`
+	Pin  []string `json:"pin,omitempty"`
 }
 
 type vendorer struct {
@@ -35,6 +36,18 @@ type vendorer struct {
 	downloaded map[string]string // full URL -> path relative to outDir
 	types      map[string]string // full URL -> types path relative to outDir (from x-typescript-types)
 	esmPaths   map[string]string // X-ESM-Path value -> path relative to outDir
+}
+
+func (c *Config) isPinned(key string) bool {
+	if c.Unpm == nil {
+		return false
+	}
+	for _, p := range c.Unpm.Pin {
+		if p == key {
+			return true
+		}
+	}
+	return false
 }
 
 func ReadConfig(configPath string) (*Config, error) {
@@ -101,6 +114,9 @@ func Fetch(cfg *Config, outDir, root string) error {
 	// Download all imports; relPath is relative to outDir
 	downloaded := make(map[string]string) // import key -> relPath within outDir
 	for key, url := range cfg.Imports {
+		if cfg.isPinned(key) {
+			continue
+		}
 		relPath, err := v.download(url)
 		if err != nil {
 			return fmt.Errorf("downloading %q: %w", key, err)
@@ -127,6 +143,9 @@ func Fetch(cfg *Config, outDir, root string) error {
 	// Use x-typescript-types if available, otherwise fall back to the JS file itself.
 	typesMap := make(map[string]string)
 	for key, url := range cfg.Imports {
+		if cfg.isPinned(key) {
+			continue
+		}
 		if typesRel, ok := v.types[url]; ok {
 			typesMap[key] = "./" + typesRel
 		} else {
