@@ -38,6 +38,26 @@ type vendorer struct {
 	esmPaths   map[string]string // X-ESM-Path value -> path relative to outDir
 }
 
+// MergePin appends CLI pin values into the config, deduplicating.
+func MergePin(cfg *Config, pins []string) {
+	if len(pins) == 0 {
+		return
+	}
+	if cfg.Unpm == nil {
+		cfg.Unpm = &Options{}
+	}
+	existing := map[string]bool{}
+	for _, p := range cfg.Unpm.Pin {
+		existing[p] = true
+	}
+	for _, p := range pins {
+		if !existing[p] {
+			cfg.Unpm.Pin = append(cfg.Unpm.Pin, p)
+			existing[p] = true
+		}
+	}
+}
+
 func (c *Config) isPinned(key string) bool {
 	if c.Unpm == nil {
 		return false

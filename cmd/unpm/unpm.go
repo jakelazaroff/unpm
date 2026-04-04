@@ -10,30 +10,48 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/jakelazaroff/unpm/pkg/unpm"
 )
+
+// stringSlice implements flag.Value so a flag can be repeated.
+type stringSlice []string
+
+func (s *stringSlice) String() string { return strings.Join(*s, ", ") }
+func (s *stringSlice) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
 
 const defaultOut = "vendor"
 const defaultRoot = "."
 
 func main() {
+	var fetchConfigVal, fetchOutVal, fetchRootVal string
+	var fetchPinVal stringSlice
 	fetchCmd := flag.NewFlagSet("fetch", flag.ExitOnError)
-	fetchConfig := fetchCmd.String("i", "unpm.json", "path to import map JSON file")
-	fetchOut := fetchCmd.String("o", defaultOut, "output directory")
-	fetchRoot := fetchCmd.String("r", defaultRoot, "root directory for import map paths")
+	fetchCmd.StringVar(&fetchConfigVal, "config", "unpm.json", "path to config JSON file")
+	fetchCmd.StringVar(&fetchOutVal, "out", defaultOut, "output directory")
+	fetchCmd.StringVar(&fetchRootVal, "root", defaultRoot, "root directory for import map paths")
+	fetchCmd.Var(&fetchPinVal, "pin", "pin a module specifier (can be repeated)")
 
+	var checkConfigVal, checkOutVal string
 	checkCmd := flag.NewFlagSet("check", flag.ExitOnError)
-	checkConfig := checkCmd.String("i", "unpm.json", "path to import map JSON file")
-	checkOut := checkCmd.String("o", defaultOut, "vendor directory to check")
+	checkCmd.StringVar(&checkConfigVal, "config", "unpm.json", "path to config JSON file")
+	checkCmd.StringVar(&checkOutVal, "out", defaultOut, "vendor directory to check")
 
+	var pruneConfigVal, pruneOutVal string
+	var prunePinVal stringSlice
 	pruneCmd := flag.NewFlagSet("prune", flag.ExitOnError)
-	pruneConfig := pruneCmd.String("i", "unpm.json", "path to import map JSON file")
-	pruneOut := pruneCmd.String("o", defaultOut, "vendor directory to prune")
+	pruneCmd.StringVar(&pruneConfigVal, "config", "unpm.json", "path to config JSON file")
+	pruneCmd.StringVar(&pruneOutVal, "out", defaultOut, "vendor directory to prune")
+	pruneCmd.Var(&prunePinVal, "pin", "pin a module specifier (can be repeated)")
 
+	var whyConfigVal, whyOutVal string
 	whyCmd := flag.NewFlagSet("why", flag.ExitOnError)
-	whyConfig := whyCmd.String("i", "unpm.json", "path to import map JSON file")
-	whyOut := whyCmd.String("o", defaultOut, "vendor directory")
+	whyCmd.StringVar(&whyConfigVal, "config", "unpm.json", "path to config JSON file")
+	whyCmd.StringVar(&whyOutVal, "out", defaultOut, "vendor directory")
 
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "usage: unpm <command> [flags]\n\ncommands:\n  fetch   download and vendor imports\n  check   warn about bare imports missing from import map\n  prune   remove unreachable vendored files\n  why     explain why a transitive dependency is imported\n")
@@ -43,13 +61,14 @@ func main() {
 	switch os.Args[1] {
 	case "fetch":
 		fetchCmd.Parse(os.Args[2:])
-		cfg, err := unpm.ReadConfig(*fetchConfig)
+		cfg, err := unpm.ReadConfig(fetchConfigVal)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		outDir := unpm.OutDir(cfg, *fetchConfig, *fetchOut, defaultOut)
-		root := unpm.Root(cfg, *fetchConfig, *fetchRoot, defaultRoot)
+		unpm.MergePin(cfg, []string(fetchPinVal))
+		outDir := unpm.OutDir(cfg, fetchConfigVal, fetchOutVal, defaultOut)
+		root := unpm.Root(cfg, fetchConfigVal, fetchRootVal, defaultRoot)
 		fmt.Println("unpm: fetching imports...")
 		if err := unpm.Fetch(cfg, outDir, root); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -59,12 +78,12 @@ func main() {
 
 	case "check":
 		checkCmd.Parse(os.Args[2:])
-		cfg, err := unpm.ReadConfig(*checkConfig)
+		cfg, err := unpm.ReadConfig(checkConfigVal)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		outDir := unpm.OutDir(cfg, *checkConfig, *checkOut, defaultOut)
+		outDir := unpm.OutDir(cfg, checkConfigVal, checkOutVal, defaultOut)
 		fmt.Println("unpm: checking imports...")
 		if err := unpm.Check(cfg, outDir); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -74,12 +93,13 @@ func main() {
 
 	case "prune":
 		pruneCmd.Parse(os.Args[2:])
-		cfg, err := unpm.ReadConfig(*pruneConfig)
+		cfg, err := unpm.ReadConfig(pruneConfigVal)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		outDir := unpm.OutDir(cfg, *pruneConfig, *pruneOut, defaultOut)
+		unpm.MergePin(cfg, []string(prunePinVal))
+		outDir := unpm.OutDir(cfg, pruneConfigVal, pruneOutVal, defaultOut)
 		fmt.Println("unpm: pruning vendor...")
 		if err := unpm.Prune(cfg, outDir); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -93,12 +113,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "usage: unpm why <file>\n")
 			os.Exit(1)
 		}
-		cfg, err := unpm.ReadConfig(*whyConfig)
+		cfg, err := unpm.ReadConfig(whyConfigVal)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		outDir := unpm.OutDir(cfg, *whyConfig, *whyOut, defaultOut)
+		outDir := unpm.OutDir(cfg, whyConfigVal, whyOutVal, defaultOut)
 		if err := unpm.Why(cfg, outDir, whyCmd.Arg(0)); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
