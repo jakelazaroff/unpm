@@ -18,18 +18,9 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/jakelazaroff/unpm/pkg/cfg"
 )
-
-type Config struct {
-	Imports map[string]string `json:"imports"`
-	Unpm    *Options          `json:"$unpm,omitempty"`
-}
-
-type Options struct {
-	Out  string   `json:"out,omitempty"`
-	Root string   `json:"root,omitempty"`
-	Pin  []string `json:"pin,omitempty"`
-}
 
 type vendorer struct {
 	outDir     string
@@ -38,94 +29,9 @@ type vendorer struct {
 	esmPaths   map[string]string // X-ESM-Path value -> path relative to outDir
 }
 
-// MergePin appends CLI pin values into the config, deduplicating.
-func MergePin(cfg *Config, pins []string) {
-	if len(pins) == 0 {
-		return
-	}
-	if cfg.Unpm == nil {
-		cfg.Unpm = &Options{}
-	}
-	existing := map[string]bool{}
-	for _, p := range cfg.Unpm.Pin {
-		existing[p] = true
-	}
-	for _, p := range pins {
-		if !existing[p] {
-			cfg.Unpm.Pin = append(cfg.Unpm.Pin, p)
-			existing[p] = true
-		}
-	}
-}
-
-func (c *Config) isPinned(key string) bool {
-	if c.Unpm == nil {
-		return false
-	}
-	for _, p := range c.Unpm.Pin {
-		if p == key {
-			return true
-		}
-	}
-	return false
-}
-
-func ReadConfig(configPath string) (*Config, error) {
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("reading config: %w", err)
-	}
-
-	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
-	}
-
-	if len(cfg.Imports) == 0 {
-		return nil, fmt.Errorf("no imports found in %s", configPath)
-	}
-
-	for key, url := range cfg.Imports {
-		if strings.HasSuffix(key, "/") {
-			return nil, fmt.Errorf("trailing-slash prefix entries are not supported: %q (list each subpath explicitly)", key)
-		}
-		if !strings.HasPrefix(url, "https://") {
-			return nil, fmt.Errorf("URL for %q must be an https:// URL, got: %s", key, url)
-		}
-	}
-
-	return &cfg, nil
-}
-
-// OutDir returns the output directory. The flag takes precedence if set;
-// otherwise the config's "out" field is used (resolved relative to configPath);
-// otherwise the default is returned.
-func OutDir(cfg *Config, configPath, flagVal, flagDefault string) string {
-	if flagVal != flagDefault {
-		return flagVal
-	}
-	if cfg.Unpm != nil && cfg.Unpm.Out != "" {
-		return filepath.Join(filepath.Dir(configPath), cfg.Unpm.Out)
-	}
-	return flagDefault
-}
-
-// Root returns the root directory for import map paths. The flag takes precedence
-// if set; otherwise the config's "root" field is used (resolved relative to
-// configPath); otherwise the default (parent of outDir) is returned.
-func Root(cfg *Config, configPath, flagVal, flagDefault string) string {
-	if flagVal != flagDefault {
-		return flagVal
-	}
-	if cfg.Unpm != nil && cfg.Unpm.Root != "" {
-		return filepath.Join(filepath.Dir(configPath), cfg.Unpm.Root)
-	}
-	return flagDefault
-}
-
-func Fetch(cfg *Config, outDir, root string) error {
+func Fetch(c *cfg.Config) error {
 	v := &vendorer{
-		outDir:     outDir,
+		outDir:     c.Unpm.Out,
 		downloaded: make(map[string]string),
 		types:      make(map[string]string),
 		esmPaths:   make(map[string]string),
@@ -133,11 +39,11 @@ func Fetch(cfg *Config, outDir, root string) error {
 
 	// Download all imports; relPath is relative to outDir
 	downloaded := make(map[string]string) // import key -> relPath within outDir
-	for key, url := range cfg.Imports {
-		if cfg.isPinned(key) {
+	for key, rawURL := range c.Imports {
+		if c.IsPinned(key) {
 			continue
 		}
-		relPath, err := v.download(url)
+		relPath, err := v.download(rawURL)
 		if err != nil {
 			return fmt.Errorf("downloading %q: %w", key, err)
 		}
@@ -147,47 +53,47 @@ func Fetch(cfg *Config, outDir, root string) error {
 	// Compute absolute import map paths from root
 	rewritten := make(map[string]string)
 	for key, relPath := range downloaded {
-		absPath := filepath.Join(outDir, filepath.FromSlash(relPath))
-		fromRoot, err := filepath.Rel(root, absPath)
+		absPath := filepath.Join(c.Unpm.Out, filepath.FromSlash(relPath))
+		fromRoot, err := filepath.Rel(c.Unpm.Root, absPath)
 		if err != nil {
 			return fmt.Errorf("computing relative path for %q: %w", key, err)
 		}
 		rewritten[key] = "/" + filepath.ToSlash(fromRoot)
 	}
 
-	if err := writeImportMap(outDir, rewritten); err != nil {
+	if err := writeImportMap(c.Unpm.Out, rewritten); err != nil {
 		return err
 	}
 
 	// Build types mapping: import key -> types path relative to outDir.
 	// Use x-typescript-types if available, otherwise fall back to the JS file itself.
 	typesMap := make(map[string]string)
-	for key, url := range cfg.Imports {
-		if cfg.isPinned(key) {
+	for key, rawURL := range c.Imports {
+		if c.IsPinned(key) {
 			continue
 		}
-		if typesRel, ok := v.types[url]; ok {
+		if typesRel, ok := v.types[rawURL]; ok {
 			typesMap[key] = "./" + typesRel
 		} else {
 			typesMap[key] = "./" + downloaded[key]
 		}
 	}
 
-	if err := writeTypesDts(outDir, typesMap); err != nil {
+	if err := writeTypesDts(c.Unpm.Out, typesMap); err != nil {
 		return err
 	}
 
-	checkBareImports(outDir, cfg.Imports)
+	checkBareImports(c.Unpm.Out, c.Imports)
 
 	return nil
 }
 
-func Check(cfg *Config, outDir string) error {
+func Check(c *cfg.Config) error {
 	var errors []string
 
 	// 1. Error: bare module specifiers in vendored files not in the import map.
 	missing := map[string][]string{}
-	filepath.Walk(outDir, func(p string, info os.FileInfo, err error) error {
+	filepath.Walk(c.Unpm.Out, func(p string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
@@ -199,14 +105,14 @@ func Check(cfg *Config, outDir string) error {
 		if err != nil {
 			return nil
 		}
-		relPath, _ := filepath.Rel(outDir, p)
+		relPath, _ := filepath.Rel(c.Unpm.Out, p)
 		relPath = filepath.ToSlash(relPath)
 		for _, m := range allImportRe.FindAllStringSubmatch(string(data), -1) {
 			spec := m[1]
 			if strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") || strings.Contains(spec, "://") {
 				continue
 			}
-			if _, ok := cfg.Imports[spec]; !ok {
+			if _, ok := c.Imports[spec]; !ok {
 				missing[spec] = append(missing[spec], relPath)
 			}
 		}
@@ -217,13 +123,13 @@ func Check(cfg *Config, outDir string) error {
 	}
 
 	// 2. Error: import map entries with no corresponding file on disk.
-	for key, rawURL := range cfg.Imports {
-		relPath, err := resolveVendorPath(rawURL, outDir)
+	for key, rawURL := range c.Imports {
+		relPath, err := resolveVendorPath(rawURL, c.Unpm.Out)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("%q (%s): %v", key, rawURL, err))
 			continue
 		}
-		absPath := filepath.Join(outDir, filepath.FromSlash(relPath))
+		absPath := filepath.Join(c.Unpm.Out, filepath.FromSlash(relPath))
 		if _, err := os.Stat(absPath); os.IsNotExist(err) {
 			errors = append(errors, fmt.Sprintf("%q: expected file %s not found on disk", key, relPath))
 		}
@@ -231,26 +137,26 @@ func Check(cfg *Config, outDir string) error {
 
 	// 3. Warning: files on disk not reachable from any import map entry.
 	reachable := map[string]bool{
-		filepath.Clean(filepath.Join(outDir, "importmap.js")):   true,
-		filepath.Clean(filepath.Join(outDir, "importmap.json")): true,
-		filepath.Clean(filepath.Join(outDir, "jsconfig.json")):  true,
+		filepath.Clean(filepath.Join(c.Unpm.Out, "importmap.js")):   true,
+		filepath.Clean(filepath.Join(c.Unpm.Out, "importmap.json")): true,
+		filepath.Clean(filepath.Join(c.Unpm.Out, "jsconfig.json")):  true,
 	}
-	for key, rawURL := range cfg.Imports {
-		relPath, err := resolveVendorPath(rawURL, outDir)
+	for key, rawURL := range c.Imports {
+		relPath, err := resolveVendorPath(rawURL, c.Unpm.Out)
 		if err != nil {
 			continue // already reported above
 		}
-		if err := walkImports(outDir, relPath, reachable); err != nil {
+		if err := walkImports(c.Unpm.Out, relPath, reachable); err != nil {
 			fmt.Fprintf(os.Stderr, "  \033[33mwarning:\033[0m could not walk imports for %q: %v\n", key, err)
 		}
 	}
 	var unreachable []string
-	filepath.Walk(outDir, func(p string, info os.FileInfo, err error) error {
+	filepath.Walk(c.Unpm.Out, func(p string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
 		if !reachable[filepath.Clean(p)] {
-			rel, _ := filepath.Rel(outDir, p)
+			rel, _ := filepath.Rel(c.Unpm.Out, p)
 			unreachable = append(unreachable, filepath.ToSlash(rel))
 		}
 		return nil
@@ -319,19 +225,19 @@ func checkBareImports(outDir string, imports map[string]string) {
 	}
 }
 
-func Why(cfg *Config, outDir, target string) error {
+func Why(c *cfg.Config, target string) error {
 	// Normalize target to a relative path within outDir
 	target = filepath.ToSlash(target)
-	target = strings.TrimPrefix(target, filepath.ToSlash(outDir)+"/")
+	target = strings.TrimPrefix(target, filepath.ToSlash(c.Unpm.Out)+"/")
 
 	// BFS from each entry point to find the shortest import chain to target
-	for key, rawURL := range cfg.Imports {
-		relPath, err := resolveVendorPath(rawURL, outDir)
+	for key, rawURL := range c.Imports {
+		relPath, err := resolveVendorPath(rawURL, c.Unpm.Out)
 		if err != nil {
 			continue
 		}
 
-		chain := findImportChain(outDir, relPath, target)
+		chain := findImportChain(c.Unpm.Out, relPath, target)
 		if chain != nil {
 			fmt.Printf("  %s", key)
 			for _, link := range chain {
@@ -394,27 +300,27 @@ var relImportRe = regexp.MustCompile(`\b(?:import|export)\s*(?:[^"']*\bfrom\s*|)
 // allImportRe matches all import/export specifiers.
 var allImportRe = regexp.MustCompile(`\b(?:import|export)\s*(?:[^"']*\bfrom\s*|)["']([^"']+)["']`)
 
-func Prune(cfg *Config, outDir string) error {
+func Prune(c *cfg.Config) error {
 	// Walk the import graph from entry points to find all reachable files.
 	reachable := map[string]bool{
 		// Generated outputs of fetch are always reachable.
-		filepath.Clean(filepath.Join(outDir, "importmap.js")):   true,
-		filepath.Clean(filepath.Join(outDir, "importmap.json")): true,
-		filepath.Clean(filepath.Join(outDir, "jsconfig.json")):  true,
+		filepath.Clean(filepath.Join(c.Unpm.Out, "importmap.js")):   true,
+		filepath.Clean(filepath.Join(c.Unpm.Out, "importmap.json")): true,
+		filepath.Clean(filepath.Join(c.Unpm.Out, "jsconfig.json")):  true,
 	}
-	for key, rawURL := range cfg.Imports {
-		relPath, err := resolveVendorPath(rawURL, outDir)
+	for key, rawURL := range c.Imports {
+		relPath, err := resolveVendorPath(rawURL, c.Unpm.Out)
 		if err != nil {
 			return fmt.Errorf("resolving %q: %w", key, err)
 		}
-		if err := walkImports(outDir, relPath, reachable); err != nil {
+		if err := walkImports(c.Unpm.Out, relPath, reachable); err != nil {
 			return err
 		}
 	}
 
 	// Collect all files in the vendor directory
 	var toDelete []string
-	err := filepath.Walk(outDir, func(p string, info os.FileInfo, err error) error {
+	err := filepath.Walk(c.Unpm.Out, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -438,7 +344,7 @@ func Prune(cfg *Config, outDir string) error {
 	}
 
 	// Remove empty directories (walk bottom-up)
-	if err := removeEmptyDirs(outDir); err != nil {
+	if err := removeEmptyDirs(c.Unpm.Out); err != nil {
 		return fmt.Errorf("cleaning empty directories: %w", err)
 	}
 
