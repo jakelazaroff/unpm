@@ -1,6 +1,6 @@
 # unpm
 
-A last-generation package manager for next-generation websites.
+A simple package manager for no-build websites.
 
 ## Why another package manager?
 

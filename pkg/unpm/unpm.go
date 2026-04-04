@@ -34,6 +34,7 @@ type vendorer struct {
 	outDir     string
 	downloaded map[string]string // full URL -> path relative to outDir
 	types      map[string]string // full URL -> types path relative to outDir (from x-typescript-types)
+	esmPaths   map[string]string // X-ESM-Path value -> path relative to outDir
 }
 
 func ReadConfig(configPath string) (*Config, error) {
@@ -94,6 +95,7 @@ func Fetch(cfg *Config, outDir, root string) error {
 		outDir:     outDir,
 		downloaded: make(map[string]string),
 		types:      make(map[string]string),
+		esmPaths:   make(map[string]string),
 	}
 
 	// Download all imports; relPath is relative to outDir
@@ -441,6 +443,23 @@ func (v *vendorer) download(rawURL string) (string, error) {
 		return "", fmt.Errorf("fetching %s: status %d", fullURL, resp.StatusCode)
 	}
 
+	// esm.sh returns X-ESM-Path with the canonical resolved path. Skip the
+	// shim and download the resolved module directly.
+	if esmPath := resp.Header.Get("X-ESM-Path"); esmPath != "" {
+		if rel, ok := v.esmPaths[esmPath]; ok {
+			v.downloaded[fullURL] = rel
+			return rel, nil
+		}
+		canonicalURL := u.Scheme + "://" + u.Host + esmPath
+		rel, err := v.download(canonicalURL)
+		if err != nil {
+			return "", fmt.Errorf("downloading canonical path for %s: %w", fullURL, err)
+		}
+		v.downloaded[fullURL] = rel
+		v.esmPaths[esmPath] = rel
+		return rel, nil
+	}
+
 	// Derive local directory from the original URL's host + path.
 	// If the URL path has a recognized file extension, the filename is the basename;
 	// otherwise, treat the whole path as a directory and derive the filename from the response.
@@ -453,8 +472,7 @@ func (v *vendorer) download(rawURL string) (string, error) {
 	default:
 		localDir = path.Join(u.Host, u.Path)
 		// Use the final (post-redirect) URL to determine filename
-		finalURL := resp.Request.URL
-		filename = path.Base(finalURL.Path)
+		filename = path.Base(resp.Request.URL.Path)
 		if filename == "" || filename == "/" || filename == "." {
 			filename = "index.js"
 		}
