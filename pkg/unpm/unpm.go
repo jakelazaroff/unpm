@@ -183,7 +183,94 @@ func Fetch(cfg *Config, outDir, root string) error {
 }
 
 func Check(cfg *Config, outDir string) error {
-	checkBareImports(outDir, cfg.Imports)
+	var errors []string
+
+	// 1. Error: bare module specifiers in vendored files not in the import map.
+	missing := map[string][]string{}
+	filepath.Walk(outDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(p))
+		if ext != ".js" && ext != ".mjs" {
+			return nil
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return nil
+		}
+		relPath, _ := filepath.Rel(outDir, p)
+		relPath = filepath.ToSlash(relPath)
+		for _, m := range allImportRe.FindAllStringSubmatch(string(data), -1) {
+			spec := m[1]
+			if strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") || strings.Contains(spec, "://") {
+				continue
+			}
+			if _, ok := cfg.Imports[spec]; !ok {
+				missing[spec] = append(missing[spec], relPath)
+			}
+		}
+		return nil
+	})
+	for spec, files := range missing {
+		errors = append(errors, fmt.Sprintf("%q is imported by %s but missing from import map", spec, strings.Join(files, ", ")))
+	}
+
+	// 2. Error: import map entries with no corresponding file on disk.
+	for key, rawURL := range cfg.Imports {
+		relPath, err := resolveVendorPath(rawURL, outDir)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%q (%s): %v", key, rawURL, err))
+			continue
+		}
+		absPath := filepath.Join(outDir, filepath.FromSlash(relPath))
+		if _, err := os.Stat(absPath); os.IsNotExist(err) {
+			errors = append(errors, fmt.Sprintf("%q: expected file %s not found on disk", key, relPath))
+		}
+	}
+
+	// 3. Warning: files on disk not reachable from any import map entry.
+	reachable := map[string]bool{
+		filepath.Clean(filepath.Join(outDir, "importmap.js")):   true,
+		filepath.Clean(filepath.Join(outDir, "importmap.json")): true,
+		filepath.Clean(filepath.Join(outDir, "jsconfig.json")):  true,
+	}
+	for key, rawURL := range cfg.Imports {
+		relPath, err := resolveVendorPath(rawURL, outDir)
+		if err != nil {
+			continue // already reported above
+		}
+		if err := walkImports(outDir, relPath, reachable); err != nil {
+			fmt.Fprintf(os.Stderr, "  \033[33mwarning:\033[0m could not walk imports for %q: %v\n", key, err)
+		}
+	}
+	var unreachable []string
+	filepath.Walk(outDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if !reachable[filepath.Clean(p)] {
+			rel, _ := filepath.Rel(outDir, p)
+			unreachable = append(unreachable, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	for _, f := range unreachable {
+		fmt.Fprintf(os.Stderr, "  \033[33mwarning:\033[0m %s is not reachable from any import map entry\n", f)
+	}
+
+	if len(errors) > 0 {
+		sort.Strings(errors)
+		for _, e := range errors {
+			fmt.Fprintf(os.Stderr, "  \033[31merror:\033[0m %s\n", e)
+		}
+		return fmt.Errorf("check failed with %d error(s)", len(errors))
+	}
+
+	if len(unreachable) == 0 {
+		fmt.Println("  all checks passed")
+	}
+
 	return nil
 }
 
