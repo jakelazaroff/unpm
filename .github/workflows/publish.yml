@@ -1,0 +1,85 @@
+name: Publish
+
+permissions:
+  id-token: write
+  contents: write
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - version.txt
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Read version info
+        run: |
+          echo "VERSION=$(cat version.txt)" >> $GITHUB_ENV
+
+      - name: Try to create the "v${{ env.VERSION }}" tag
+        run: |
+          git fetch --tags
+          git tag "v$VERSION"
+
+      - name: Extract the release notes
+        run: |
+          CHANGELOG=$(awk -v "ver=$VERSION" '/^## / { if (p) { exit }; if ($2 == ver) { p=1; next} } p' CHANGELOG.md)
+          echo "CHANGELOG<<EOF" >> $GITHUB_ENV
+          echo "$CHANGELOG" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Release notes must not be empty
+        run: |
+          test -n "$CHANGELOG"
+
+      - name: Set up Go
+        uses: actions/setup-go@v3
+        with:
+          go-version-file: go.mod
+
+      - name: Build for all platforms
+        run: |
+          platforms=(
+            "linux/amd64"
+            "linux/arm64"
+            "darwin/amd64"
+            "darwin/arm64"
+            "windows/amd64"
+            "windows/arm64"
+          )
+          for platform in "${platforms[@]}"; do
+            GOOS="${platform%/*}"
+            GOARCH="${platform#*/}"
+            output="dist/unpm-${GOOS}-${GOARCH}"
+            if [ "$GOOS" = "windows" ]; then output="${output}.exe"; fi
+            GOOS="$GOOS" GOARCH="$GOARCH" go build -o "$output" ./cmd/unpm
+          done
+
+      - name: Push the tag to GitHub
+        run: |
+          git push origin tag "v$VERSION"
+
+      - name: Create a GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ env.VERSION }}
+          release_name: v${{ env.VERSION }}
+          body: ${{ env.CHANGELOG }}
+          draft: false
+          prerelease: false
+
+      - name: Upload release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for file in dist/*; do
+            gh release upload "v$VERSION" "$file"
+          done
