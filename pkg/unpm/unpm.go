@@ -109,6 +109,9 @@ func Check(c *cfg.Config) error {
 		relPath = filepath.ToSlash(relPath)
 		for _, m := range allImportRe.FindAllStringSubmatch(string(data), -1) {
 			spec := m[1]
+			if spec == "" {
+				spec = m[2]
+			}
 			if strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") || strings.Contains(spec, "://") {
 				continue
 			}
@@ -205,6 +208,9 @@ func checkBareImports(outDir string, imports map[string]string) {
 
 		for _, m := range allImportRe.FindAllStringSubmatch(string(data), -1) {
 			spec := m[1]
+			if spec == "" {
+				spec = m[2]
+			}
 			if strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") || strings.Contains(spec, "://") {
 				continue
 			}
@@ -281,7 +287,11 @@ func findImportChain(outDir, start, target string) []string {
 		}
 
 		for _, m := range relImportRe.FindAllStringSubmatch(string(data), -1) {
-			depPath := path.Join(path.Dir(cur.relPath), m[1])
+			spec := m[1]
+			if spec == "" {
+				spec = m[2]
+			}
+			depPath := path.Join(path.Dir(cur.relPath), spec)
 			if !visited[filepath.Clean(filepath.Join(outDir, depPath))] {
 				queue = append(queue, node{
 					relPath: depPath,
@@ -294,11 +304,11 @@ func findImportChain(outDir, start, target string) []string {
 	return nil
 }
 
-// relImportRe matches import/export statements with relative path specifiers.
-var relImportRe = regexp.MustCompile(`\b(?:import|export)\s*(?:[^"']*\bfrom\s*|)["'](\.[^"']+)["']`)
+// relImportRe matches import/export statements and dynamic import() calls with relative path specifiers.
+var relImportRe = regexp.MustCompile(`(?:\b(?:import|export)\s*(?:[^"']*\bfrom\s*|)["'](\.[^"']+)["']|\bimport\s*\(\s*["'](\.[^"']+)["']\s*\))`)
 
-// allImportRe matches all import/export specifiers.
-var allImportRe = regexp.MustCompile(`\b(?:import|export)\s*(?:[^"']*\bfrom\s*|)["']([^"']+)["']`)
+// allImportRe matches all import/export specifiers and dynamic import() calls.
+var allImportRe = regexp.MustCompile(`(?:\b(?:import|export)\s*(?:[^"']*\bfrom\s*|)["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\))`)
 
 func Prune(c *cfg.Config) error {
 	// Walk the import graph from entry points to find all reachable files.
@@ -404,6 +414,9 @@ func walkImports(outDir, relPath string, reachable map[string]bool) error {
 	matches := relImportRe.FindAllStringSubmatch(string(data), -1)
 	for _, m := range matches {
 		depRel := m[1]
+		if depRel == "" {
+			depRel = m[2]
+		}
 		// Resolve relative to the current file's directory
 		depPath := path.Join(path.Dir(relPath), depRel)
 		if err := walkImports(outDir, depPath, reachable); err != nil {
@@ -443,9 +456,10 @@ func removeEmptyDirs(root string) error {
 	return nil
 }
 
-// importRe matches import/export statements with origin-relative or relative path specifiers.
-// Captures the full statement prefix (group 1), the quote char (group 2), and the path (group 3).
-var importRe = regexp.MustCompile(`(\b(?:import|export)\s*(?:[^"']*\bfrom\s*|))(["'])((?:/|\.\.?/)[^"']+)(["'])`)
+// importRe matches import/export statements and dynamic import() calls with origin-relative or relative path specifiers.
+// For static imports: captures the statement prefix (group 1), quote char (group 2), path (group 3), closing quote (group 4).
+// For dynamic imports: captures "import(" prefix (group 5), quote char (group 6), path (group 7), closing quote + ")" (group 8).
+var importRe = regexp.MustCompile(`(\b(?:import|export)\s*(?:[^"']*\bfrom\s*|))(["'])((?:/|\.\.?/)[^"']+)(["'])|(\bimport\s*\(\s*)(["'])((?:/|\.\.?/)[^"']+)(["']\s*\))`)
 
 // sourceMappingRe matches //# sourceMappingURL=... comments.
 var sourceMappingRe = regexp.MustCompile(`(//[#@]\s*sourceMappingURL\s*=\s*)(\S+)`)
@@ -581,9 +595,20 @@ func (v *vendorer) rewriteImports(content, currentFileRel, currentURL string) (s
 		}
 
 		groups := importRe.FindStringSubmatch(match)
-		prefix := groups[1]  // e.g. `export * from `
-		quote := groups[2]   // opening quote
-		impPath := groups[3] // e.g. `/preact@10.19.3/es2022/preact.mjs` or `./jsx.d.ts`
+
+		// Determine prefix, quote, and path from either static (groups 1-4) or dynamic (groups 5-8) branch
+		var prefix, quote, impPath, suffix string
+		if groups[1] != "" {
+			prefix = groups[1]
+			quote = groups[2]
+			impPath = groups[3]
+			suffix = groups[4]
+		} else {
+			prefix = groups[5]
+			quote = groups[6]
+			impPath = groups[7]
+			suffix = groups[8]
+		}
 
 		var depURL string
 		if strings.HasPrefix(impPath, "/") {
@@ -607,7 +632,7 @@ func (v *vendorer) rewriteImports(content, currentFileRel, currentURL string) (s
 			relFromHere = "./" + relFromHere
 		}
 
-		return prefix + quote + relFromHere + quote
+		return prefix + quote + relFromHere + suffix
 	})
 
 	return result, rewriteErr

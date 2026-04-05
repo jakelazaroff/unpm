@@ -269,6 +269,40 @@ func TestFetch_SourceMap(t *testing.T) {
 	}
 }
 
+func TestFetch_DynamicImport(t *testing.T) {
+	srv := newTestServer(map[string]testFile{
+		"/entry.js": {body: `const mod = import("./lazy.js"); export default mod;`},
+		"/lazy.js":  {body: `export const lazy = "loaded";`},
+	})
+	defer srv.Close()
+
+	outDir := filepath.Join(t.TempDir(), "vendor")
+	c := &cfg.Config{
+		Imports: map[string]string{"entry": srv.URL + "/entry.js"},
+		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
+	}
+	if err := unpm.Fetch(c); err != nil {
+		t.Fatal(err)
+	}
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	// Both files should be downloaded
+	for _, name := range []string{"entry.js", "lazy.js"} {
+		p := filepath.Join(outDir, host, name)
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("expected %s to exist: %v", name, err)
+		}
+	}
+
+	// entry.js should have rewritten dynamic import path
+	data, _ := os.ReadFile(filepath.Join(outDir, host, "entry.js"))
+	content := string(data)
+	if !strings.Contains(content, `import("./lazy.js")`) {
+		t.Fatalf("expected rewritten dynamic import to ./lazy.js, got: %s", content)
+	}
+}
+
 func TestFetch_Pin(t *testing.T) {
 	srv := newTestServer(map[string]testFile{
 		"/a.js": {body: `export const a = 1;`},
