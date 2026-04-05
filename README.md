@@ -67,7 +67,7 @@ If you're using TypeScript to check your code, you'll need to tell it where to f
 
 ## CLI
 
-Note that there are no commands for adding or removing packages
+Note that there are no commands for adding or removing packages; instead, you should edit `unpm.json` directly.
 
 ### fetch
 
@@ -128,7 +128,25 @@ To use `unpm.json` directly as an import map, remove the `$unpm` key — browser
 
 These aren't actually frequently asked; just socratic explanations:
 
-### Don't all real web applications use a build step?
+### Isn't it bad to commit dependencies to my repo?
+
+Nope! There are two main reasons most package managers advise you not to commit dependencies:
+
+- The folder can be really big.
+- Dependencies with native binaries will only work on a single platform.
+
+The solution to the first is to download less code (and, ideally, use fewer dependencies in the first place). The second isn't an issue for websites because code that runs in browsers is not platform specific.
+
+Most package managers add a ton of overhead just to get back what vendoring gives you for free:
+
+- Since your dependencies are not committed to source control, you depend on an external system to build and run your app.
+- Since installation across version ranges is non-deterministic, they need a lock file to make sure the exact same dependencies get installed.
+- Since you can't just edit a dependency file, they need [baroque workarounds](https://pnpm.io/cli/patch) to let you patch a dependency.
+- Since you can't use the installed files in your browser, you need _another_ tool to bundle everything together.
+
+If you're still unconvinced, htmx has [a great essay on vendoring dependencies](https://htmx.org/essays/vendoring/).
+
+### Don't real web applications need a build step?
 
 Not at all! JavaScript has gotten really good; these days, you can get a similar developer experience without building anything. [Multiple](https://preactjs.com/guide/v10/no-build-workflows/) [major](https://github.com/solidjs/solid/blob/main/packages/solid/html/README.md) [frameworks](https://vuejs.org/guide/extras/ways-of-using-vue.html#standalone-script) have documentation on no-build setups.
 
@@ -142,14 +160,3 @@ In practice, though, there are a bunch of problems unpm solves beyond just downl
 - If a library is written in TypeScript, you'd need to find a transpiled version.
 - If you're checking types, you'd need to find the type definitions and configure TypeScript.
 - If a transitive dependency is missing from your import map, you won't know until you actually load your website.
-
-### Why would you commit your dependencies to your repo?
-
-Why wouldn't you? Most package managers add a ton of overhead just to get back what vendoring gives you for free:
-
-- Since your dependencies are not committed to source control, you depend on an additional third party to build and run your app.
-- Since installation across version ranges is non-deterministic, they need a lock file to make sure the exact same dependencies get installed.
-- Since you can't just edit a dependency file, they need [baroque workarounds](https://pnpm.io/cli/patch) to let you patch a dependency.
-- Since you can't use the installed files in your browser, you need _another_ tool to bundle everything together.
-
-If you're still unconvinced, htmx has [a great essay on vendoring dependencies](https://htmx.org/essays/vendoring/).
