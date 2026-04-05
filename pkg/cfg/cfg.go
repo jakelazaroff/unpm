@@ -50,7 +50,7 @@ func ReadConfig(configPath string) (*Config, error) {
 		}
 	}
 
-	// Apply defaults, resolved relative to the config file's directory.
+	// apply defaults, resolved relative to the config file's directory
 	dir := filepath.Dir(configPath)
 	if cfg.Unpm.Out == "" {
 		cfg.Unpm.Out = filepath.Join(dir, "vendor")

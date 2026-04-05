@@ -26,22 +26,26 @@ func (s *stringSlice) Set(v string) error {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "usage: unpm <command> [flags]\n\ncommands:\n  fetch   download and vendor imports\n  check   warn about bare imports missing from import map\n  prune   remove unreachable vendored files\n  why     explain why a transitive dependency is imported\n")
+	// print help if necessary
+	if len(os.Args) < 2 || os.Args[1] == "help" {
+		fmt.Fprintf(os.Stderr, "usage: unpm <command> [flags]\n\ncommands:\n  fetch   download and vendor imports\n  check   warn about import map issues\n  prune   remove unreachable vendored files\n  why     explain why a file is vendored\n")
 		os.Exit(1)
 	}
 
+	// get the command
 	cmd := os.Args[1]
 
-	var configVal, outVal, rootVal string
-	var pinVal stringSlice
+	// get any flags
+	var config, out, root string
+	var pin stringSlice
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
-	fs.StringVar(&configVal, "config", "unpm.json", "path to config JSON file")
-	fs.StringVar(&outVal, "out", "", "output directory")
-	fs.StringVar(&rootVal, "root", "", "root directory for import map paths")
-	fs.Var(&pinVal, "pin", "pin a module specifier (can be repeated)")
+	fs.StringVar(&config, "config", "unpm.json", "path to config JSON file")
+	fs.StringVar(&out, "out", "", "output directory")
+	fs.StringVar(&root, "root", "", "root directory for import map paths")
+	fs.Var(&pin, "pin", "pin a module specifier (can be repeated)")
 	fs.Parse(os.Args[2:])
 
+	// ensure the command is valid
 	switch cmd {
 	case "fetch", "check", "prune", "why":
 	default:
@@ -49,19 +53,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	c, err := cfg.ReadConfig(configVal)
+	// read the config file
+	c, err := cfg.ReadConfig(config)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	if outVal != "" {
-		c.Unpm.Out = outVal
-	}
-	if rootVal != "" {
-		c.Unpm.Root = rootVal
-	}
-	c.Unpm.Pin = append(c.Unpm.Pin, pinVal...)
 
+	// have flags override any config options
+	if out != "" {
+		c.Unpm.Out = out
+	}
+	if root != "" {
+		c.Unpm.Root = root
+	}
+	c.Unpm.Pin = append(c.Unpm.Pin, pin...)
+
+	// run the command
 	switch cmd {
 	case "fetch":
 		fmt.Println("unpm: fetching imports...")
