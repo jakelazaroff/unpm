@@ -43,7 +43,26 @@ func main() {
 	fs.StringVar(&out, "out", "", "output directory")
 	fs.StringVar(&root, "root", "", "root directory for import map paths")
 	fs.Var(&pin, "pin", "pin a module specifier (can be repeated)")
-	fs.Parse(os.Args[2:])
+	// reorder args so flags can appear anywhere
+	args := os.Args[2:]
+	var flagArgs, posArgs []string
+	for i := 0; i < len(args); i++ {
+		if strings.HasPrefix(args[i], "-") {
+			flagArgs = append(flagArgs, args[i])
+			// if the flag has a separate value (not --flag=val), consume the next arg too
+			name := strings.TrimLeft(args[i], "-")
+			if !strings.Contains(name, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				// check if this is a known flag that takes a value
+				if f := fs.Lookup(name); f != nil {
+					i++
+					flagArgs = append(flagArgs, args[i])
+				}
+			}
+		} else {
+			posArgs = append(posArgs, args[i])
+		}
+	}
+	fs.Parse(append(flagArgs, posArgs...))
 
 	// ensure the command is valid
 	switch cmd {
