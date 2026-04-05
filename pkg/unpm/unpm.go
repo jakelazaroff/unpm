@@ -26,7 +26,7 @@ type vendorer struct {
 	outDir     string
 	downloaded map[string]string // full URL -> path relative to outDir
 	types      map[string]string // full URL -> types path relative to outDir (from x-typescript-types)
-	esmPaths   map[string]string // X-ESM-Path value -> path relative to outDir
+	esmPaths   map[string]string // x-esm-path value -> path relative to outDir
 }
 
 func Fetch(c *cfg.Config) error {
@@ -489,9 +489,9 @@ func (v *vendorer) download(rawURL string) (string, error) {
 		return "", fmt.Errorf("fetching %s: status %d", fullURL, resp.StatusCode)
 	}
 
-	// esm.sh returns X-ESM-Path with the canonical resolved path. Skip the
+	// esm.sh returns x-esm-path with the canonical resolved path. Skip the
 	// shim and download the resolved module directly.
-	if esmPath := resp.Header.Get("X-ESM-Path"); esmPath != "" {
+	if esmPath := resp.Header.Get("x-esm-path"); esmPath != "" {
 		if rel, ok := v.esmPaths[esmPath]; ok {
 			v.downloaded[fullURL] = rel
 			return rel, nil
@@ -569,7 +569,7 @@ func (v *vendorer) download(rawURL string) (string, error) {
 	fmt.Printf("  %s -> %s\n", fullURL, rel)
 
 	// If the response includes type definitions, download them too
-	if typesURL := resp.Header.Get("X-Typescript-Types"); typesURL != "" {
+	if typesURL := resp.Header.Get("x-typescript-types"); typesURL != "" {
 		if strings.HasPrefix(typesURL, "/") {
 			typesURL = u.Scheme + "://" + u.Host + typesURL
 		}
@@ -718,14 +718,14 @@ document.currentScript.after(importmap);
 	return nil
 }
 
-func writeTypesDts(outDir string, typesMap map[string]string) error {
-	if len(typesMap) == 0 {
+func writeTypesDts(dir string, types map[string]string) error {
+	if len(types) == 0 {
 		return nil
 	}
 
 	paths := make(map[string][]string)
-	for key, typesPath := range typesMap {
-		paths[key] = []string{typesPath}
+	for key, path := range types {
+		paths[key] = []string{path}
 	}
 
 	data, err := json.MarshalIndent(map[string]any{
@@ -737,7 +737,7 @@ func writeTypesDts(outDir string, typesMap map[string]string) error {
 		return fmt.Errorf("marshaling jsconfig.json: %w", err)
 	}
 
-	dest := filepath.Join(outDir, "jsconfig.json")
+	dest := filepath.Join(dir, "jsconfig.json")
 	if err := os.WriteFile(dest, append(data, '\n'), 0o644); err != nil {
 		return fmt.Errorf("writing jsconfig.json: %w", err)
 	}
