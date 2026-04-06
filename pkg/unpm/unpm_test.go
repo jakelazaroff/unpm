@@ -425,6 +425,41 @@ func TestCheck(t *testing.T) {
 		os.WriteFile(filepath.Join(outDir, "importmap.json"), []byte(`{"imports":{"a":"/example.com/a.js"}}`), 0o644)
 	})
 
+	t.Run("source map not flagged as unreachable", func(t *testing.T) {
+		// a.js references a.js.map via sourceMappingURL — it should be considered reachable
+		os.WriteFile(filepath.Join(dir, "a.js"), []byte("export const a = 1;\n//# sourceMappingURL=a.js.map"), 0o644)
+		os.WriteFile(filepath.Join(dir, "a.js.map"), []byte(`{"version":3}`), 0o644)
+		os.WriteFile(filepath.Join(outDir, "importmap.json"), []byte(`{"imports":{"a":"/example.com/a.js"}}`), 0o644)
+		c := &cfg.Config{
+			Imports: map[string]string{"a": "https://example.com/a.js"},
+			Unpm:    cfg.Options{Out: outDir, Root: outDir},
+		}
+
+		// Capture stderr to check for spurious warnings
+		oldStderr := os.Stderr
+		r, w, _ := os.Pipe()
+		os.Stderr = w
+
+		err := unpm.Check(c)
+
+		w.Close()
+		var buf [4096]byte
+		n, _ := r.Read(buf[:])
+		os.Stderr = oldStderr
+		stderr := string(buf[:n])
+
+		if err != nil {
+			t.Fatalf("expected check to pass: %v", err)
+		}
+		if strings.Contains(stderr, "a.js.map") {
+			t.Fatalf("source map should not be flagged as unreachable, got: %s", stderr)
+		}
+
+		// Restore original a.js for subsequent tests
+		os.WriteFile(filepath.Join(dir, "a.js"), []byte(`import { b } from "./b.js"; export const a = b;`), 0o644)
+		os.Remove(filepath.Join(dir, "a.js.map"))
+	})
+
 	t.Run("bare import not in map", func(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, "c.js"), []byte(`import { x } from "unknown-pkg"; export const c = x;`), 0o644)
 		os.WriteFile(filepath.Join(outDir, "importmap.json"), []byte(`{"imports":{"c":"/example.com/c.js"}}`), 0o644)

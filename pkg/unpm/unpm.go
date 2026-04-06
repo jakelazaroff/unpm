@@ -410,6 +410,16 @@ func walkImports(outDir, relPath string, reachable map[string]bool) error {
 		}
 	}
 
+	// Mark source maps referenced by //# sourceMappingURL=... as reachable
+	for _, m := range sourceMappingRe.FindAllStringSubmatch(string(data), -1) {
+		mapRel := m[2]
+		if strings.HasPrefix(mapRel, "data:") {
+			continue
+		}
+		mapPath := filepath.Clean(filepath.Join(outDir, path.Join(path.Dir(relPath), mapRel)))
+		reachable[mapPath] = true
+	}
+
 	return nil
 }
 
