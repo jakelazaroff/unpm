@@ -25,10 +25,10 @@ After installing unpm, create an `unpm.json` file at the root of your project:
 
 Your first reaction might be "that looks like an import map". And you'd be right: `unpm.json` files are also valid import maps!
 
-Once you've filled out `unpm.json` with all your dependencies, run `unpm fetch` to download them locally:
+Once you've filled out `unpm.json` with all your dependencies, run `unpm vendor` to download them locally:
 
 ```sh
-unpm fetch
+unpm vendor
 ```
 
 It will create a `vendor` folder that looks something like this:
@@ -69,13 +69,9 @@ If you're using TypeScript to check your code, you'll need to tell it where to f
 
 Note that there are no commands for adding or removing packages; instead, you should edit `unpm.json` directly.
 
-### fetch
+### vendor
 
-`unpm fetch` downloads all the modules listed in `unpm.json`.
-
-### prune
-
-`unpm prune` removes any downloaded files no longer reachable from one of the modules listed in `unpm.json`. This can happen if you modify or remove a module URL, or if one of the modules gets updated when you fetch.
+`unpm vendor` downloads all the modules listed in `unpm.json`. It recreates the output directory from scratch, removing any files that are no longer needed. Pinned files are preserved.
 
 ### check
 
@@ -120,7 +116,7 @@ Unlike most package managers, unpm doesn't rely on an external package repositor
 
 - `out` specifies the directory to write any output files. Defaults to `./vendor`.
 - `root` specifies the path at which the output files are available on your website. Defaults to `/vendor`.
-- `pin` is a string array of module specifiers. Any modules in this array won't be updated when running `unpm fetch`. Pinning modules is mostly useful when you've made local changes to a dependency that you don't want to be overwritten.
+- `pin` is a string array of file paths relative to the output directory. Any files in this array won't be removed or updated when running `unpm vendor`. Pinning is mostly useful when you've made local changes to a dependency that you don't want to be overwritten.
 
 To use `unpm.json` directly as an import map, remove the `$unpm` key — browser ignore unknown import map keys so it won't break anything, but there's no reason to keep it.
 

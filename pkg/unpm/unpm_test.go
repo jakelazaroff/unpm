@@ -40,7 +40,7 @@ func newTestServer(files map[string]testFile) *httptest.Server {
 	}))
 }
 
-func TestFetch_SingleFile(t *testing.T) {
+func TestVendor_SingleFile(t *testing.T) {
 	srv := newTestServer(map[string]testFile{
 		"/mylib.js": {body: `export function hello() { return "hi"; }`},
 	})
@@ -53,7 +53,7 @@ func TestFetch_SingleFile(t *testing.T) {
 		Imports: map[string]string{"mylib": srv.URL + "/mylib.js"},
 		Unpm:    cfg.Options{Out: outDir, Root: root},
 	}
-	if err := unpm.Fetch(c); err != nil {
+	if err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
 	}
 
@@ -94,7 +94,7 @@ func TestFetch_SingleFile(t *testing.T) {
 	}
 }
 
-func TestFetch_TransitiveDeps(t *testing.T) {
+func TestVendor_TransitiveDeps(t *testing.T) {
 	srv := newTestServer(map[string]testFile{
 		"/a.js": {body: `import { b } from "./b.js"; export const a = b;`},
 		"/b.js": {body: `export const b = 42;`},
@@ -106,7 +106,7 @@ func TestFetch_TransitiveDeps(t *testing.T) {
 		Imports: map[string]string{"a": srv.URL + "/a.js"},
 		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
 	}
-	if err := unpm.Fetch(c); err != nil {
+	if err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
 	}
 
@@ -127,7 +127,7 @@ func TestFetch_TransitiveDeps(t *testing.T) {
 	}
 }
 
-func TestFetch_OriginRelativeImport(t *testing.T) {
+func TestVendor_OriginRelativeImport(t *testing.T) {
 	srv := newTestServer(map[string]testFile{
 		"/entry.js":   {body: `import { dep } from "/lib/dep.js"; export default dep;`},
 		"/lib/dep.js": {body: `export const dep = "ok";`},
@@ -139,7 +139,7 @@ func TestFetch_OriginRelativeImport(t *testing.T) {
 		Imports: map[string]string{"entry": srv.URL + "/entry.js"},
 		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
 	}
-	if err := unpm.Fetch(c); err != nil {
+	if err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
 	}
 
@@ -162,7 +162,7 @@ func TestFetch_OriginRelativeImport(t *testing.T) {
 	}
 }
 
-func TestFetch_ESMPath(t *testing.T) {
+func TestVendor_ESMPath(t *testing.T) {
 	srv := newTestServer(map[string]testFile{
 		"/preact": {
 			body:    `/* shim */`,
@@ -177,7 +177,7 @@ func TestFetch_ESMPath(t *testing.T) {
 		Imports: map[string]string{"preact": srv.URL + "/preact"},
 		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
 	}
-	if err := unpm.Fetch(c); err != nil {
+	if err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
 	}
 
@@ -202,7 +202,7 @@ func TestFetch_ESMPath(t *testing.T) {
 	}
 }
 
-func TestFetch_TypeScriptTypes(t *testing.T) {
+func TestVendor_TypeScriptTypes(t *testing.T) {
 	srv := newTestServer(map[string]testFile{
 		"/mylib.js": {
 			body:    `export function hello() {}`,
@@ -217,7 +217,7 @@ func TestFetch_TypeScriptTypes(t *testing.T) {
 		Imports: map[string]string{"mylib": srv.URL + "/mylib.js"},
 		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
 	}
-	if err := unpm.Fetch(c); err != nil {
+	if err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
 	}
 
@@ -237,7 +237,7 @@ func TestFetch_TypeScriptTypes(t *testing.T) {
 	}
 }
 
-func TestFetch_SourceMap(t *testing.T) {
+func TestVendor_SourceMap(t *testing.T) {
 	srv := newTestServer(map[string]testFile{
 		"/app.js":     {body: "export const x = 1;\n//# sourceMappingURL=app.js.map"},
 		"/app.js.map": {body: `{"version":3,"sources":["app.ts"]}`},
@@ -249,7 +249,7 @@ func TestFetch_SourceMap(t *testing.T) {
 		Imports: map[string]string{"app": srv.URL + "/app.js"},
 		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
 	}
-	if err := unpm.Fetch(c); err != nil {
+	if err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
 	}
 
@@ -269,7 +269,7 @@ func TestFetch_SourceMap(t *testing.T) {
 	}
 }
 
-func TestFetch_DynamicImport(t *testing.T) {
+func TestVendor_DynamicImport(t *testing.T) {
 	srv := newTestServer(map[string]testFile{
 		"/entry.js": {body: `const mod = import("./lazy.js"); export default mod;`},
 		"/lazy.js":  {body: `export const lazy = "loaded";`},
@@ -281,7 +281,7 @@ func TestFetch_DynamicImport(t *testing.T) {
 		Imports: map[string]string{"entry": srv.URL + "/entry.js"},
 		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
 	}
-	if err := unpm.Fetch(c); err != nil {
+	if err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
 	}
 
@@ -303,7 +303,7 @@ func TestFetch_DynamicImport(t *testing.T) {
 	}
 }
 
-func TestFetch_Pin(t *testing.T) {
+func TestVendor_Pin(t *testing.T) {
 	srv := newTestServer(map[string]testFile{
 		"/a.js": {body: `export const a = 1;`},
 		"/b.js": {body: `export const b = 2;`},
@@ -325,7 +325,7 @@ func TestFetch_Pin(t *testing.T) {
 		},
 		Unpm: cfg.Options{Out: outDir, Root: root, Pin: []string{host + "/b.js"}},
 	}
-	if err := unpm.Fetch(c); err != nil {
+	if err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
 	}
 
@@ -405,55 +405,40 @@ func TestCheck(t *testing.T) {
 	})
 }
 
-func TestPrune(t *testing.T) {
-	outDir := t.TempDir()
-	host := "example.com"
+func TestVendor_CleansOldFiles(t *testing.T) {
+	srv := newTestServer(map[string]testFile{
+		"/a.js": {body: `export const a = 1;`},
+	})
+	defer srv.Close()
 
-	dir := filepath.Join(outDir, host)
-	os.MkdirAll(dir, 0o755)
+	host := strings.TrimPrefix(srv.URL, "http://")
+	root := t.TempDir()
+	outDir := filepath.Join(root, "vendor")
 
-	// a.js imports b.js (reachable); c.js is unreachable
-	os.WriteFile(filepath.Join(dir, "a.js"), []byte(`import { b } from "./b.js"; export const a = b;`), 0o644)
-	os.WriteFile(filepath.Join(dir, "b.js"), []byte(`export const b = 1;`), 0o644)
-	os.WriteFile(filepath.Join(dir, "c.js"), []byte(`export const c = "orphan";`), 0o644)
-
-	// Create an unreachable file in a subdirectory (to test empty dir removal)
-	subDir := filepath.Join(dir, "sub")
-	os.MkdirAll(subDir, 0o755)
-	os.WriteFile(filepath.Join(subDir, "orphan.js"), []byte(`export default 0;`), 0o644)
-
-	// Write generated files
-	os.WriteFile(filepath.Join(outDir, "importmap.js"), []byte(""), 0o644)
-	os.WriteFile(filepath.Join(outDir, "importmap.json"), []byte(`{"imports":{"a":"/example.com/a.js"}}`), 0o644)
-	os.WriteFile(filepath.Join(outDir, "jsconfig.json"), []byte("{}"), 0o644)
+	// Pre-create stale files that should be cleaned up
+	staleDir := filepath.Join(outDir, "old-host.com")
+	os.MkdirAll(staleDir, 0o755)
+	os.WriteFile(filepath.Join(staleDir, "stale.js"), []byte(`export const stale = 1;`), 0o644)
 
 	c := &cfg.Config{
-		Imports: map[string]string{"a": "https://example.com/a.js"},
-		Unpm:    cfg.Options{Out: outDir, Root: outDir},
+		Imports: map[string]string{"a": srv.URL + "/a.js"},
+		Unpm:    cfg.Options{Out: outDir, Root: root},
 	}
-	if err := unpm.Prune(c); err != nil {
+	if err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
 	}
 
-	// a.js and b.js should remain
-	if _, err := os.Stat(filepath.Join(dir, "a.js")); err != nil {
-		t.Fatal("a.js should not be pruned")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "b.js")); err != nil {
-		t.Fatal("b.js should not be pruned")
+	// a.js should exist
+	if _, err := os.Stat(filepath.Join(outDir, host, "a.js")); err != nil {
+		t.Fatal("a.js should be downloaded")
 	}
 
-	// c.js and sub/orphan.js should be removed
-	if _, err := os.Stat(filepath.Join(dir, "c.js")); !os.IsNotExist(err) {
-		t.Fatal("c.js should be pruned")
+	// stale file and its directory should be removed
+	if _, err := os.Stat(filepath.Join(staleDir, "stale.js")); !os.IsNotExist(err) {
+		t.Fatal("stale.js should be removed")
 	}
-	if _, err := os.Stat(filepath.Join(subDir, "orphan.js")); !os.IsNotExist(err) {
-		t.Fatal("sub/orphan.js should be pruned")
-	}
-
-	// sub/ directory should be removed (now empty)
-	if _, err := os.Stat(subDir); !os.IsNotExist(err) {
-		t.Fatal("empty sub/ directory should be removed")
+	if _, err := os.Stat(staleDir); !os.IsNotExist(err) {
+		t.Fatal("empty stale directory should be removed")
 	}
 }
 

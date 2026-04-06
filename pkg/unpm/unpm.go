@@ -31,7 +31,12 @@ type vendorer struct {
 	pinned     []string          // file paths relative to outDir that should not be overwritten
 }
 
-func Fetch(c *cfg.Config) error {
+func Vendor(c *cfg.Config) error {
+	// Clean the output directory, preserving pinned files.
+	if err := cleanOutDir(c.Unpm.Out, c.Unpm.Pin); err != nil {
+		return err
+	}
+
 	v := &vendorer{
 		outDir:     c.Unpm.Out,
 		downloaded: make(map[string]string),
@@ -85,6 +90,42 @@ func Fetch(c *cfg.Config) error {
 	return nil
 }
 
+// cleanOutDir removes all files in outDir except those whose path (relative to
+// outDir) is in the pinned list, then removes any empty directories.
+func cleanOutDir(outDir string, pinned []string) error {
+	if _, err := os.Stat(outDir); os.IsNotExist(err) {
+		return nil
+	}
+
+	var toDelete []string
+	err := filepath.Walk(outDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(outDir, p)
+		rel = filepath.ToSlash(rel)
+		if !slices.Contains(pinned, rel) {
+			toDelete = append(toDelete, p)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("walking output directory: %w", err)
+	}
+
+	for _, p := range toDelete {
+		if err := os.Remove(p); err != nil {
+			return fmt.Errorf("removing %s: %w", p, err)
+		}
+	}
+
+	if err := removeEmptyDirs(outDir); err != nil {
+		return fmt.Errorf("cleaning empty directories: %w", err)
+	}
+
+	return nil
+}
+
 func Check(c *cfg.Config) error {
 	var errors []string
 
@@ -131,7 +172,7 @@ func Check(c *cfg.Config) error {
 	for key := range c.Imports {
 		relPath, ok := entryPoints[key]
 		if !ok {
-			errors = append(errors, fmt.Sprintf("%q: not found in importmap.json (run 'unpm fetch')", key))
+			errors = append(errors, fmt.Sprintf("%q: not found in importmap.json (run 'unpm vendor')", key))
 			continue
 		}
 		absPath := filepath.Join(c.Unpm.Out, filepath.FromSlash(relPath))
@@ -308,70 +349,15 @@ var relImportRe = regexp.MustCompile(`(?:\b(?:import|export)\s*(?:[^"']*\bfrom\s
 // allImportRe matches all import/export specifiers and dynamic import() calls.
 var allImportRe = regexp.MustCompile(`(?:\b(?:import|export)\s*(?:[^"']*\bfrom\s*|)["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\))`)
 
-func Prune(c *cfg.Config) error {
-	// Walk the import graph from entry points to find all reachable files.
-	entryPoints, err := readEntryPoints(c)
-	if err != nil {
-		return err
-	}
-	reachable := map[string]bool{
-		// Generated outputs of fetch are always reachable.
-		filepath.Clean(filepath.Join(c.Unpm.Out, "importmap.js")):   true,
-		filepath.Clean(filepath.Join(c.Unpm.Out, "importmap.json")): true,
-		filepath.Clean(filepath.Join(c.Unpm.Out, "jsconfig.json")):  true,
-	}
-	for _, relPath := range entryPoints {
-		if err := walkImports(c.Unpm.Out, relPath, reachable); err != nil {
-			return err
-		}
-	}
-
-	// Collect all files in the vendor directory
-	var toDelete []string
-	err = filepath.Walk(c.Unpm.Out, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-		if !reachable[filepath.Clean(p)] {
-			toDelete = append(toDelete, p)
-		}
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("walking vendor directory: %w", err)
-	}
-
-	for _, p := range toDelete {
-		fmt.Printf("  removing %s\n", p)
-		if err := os.Remove(p); err != nil {
-			return fmt.Errorf("removing %s: %w", p, err)
-		}
-	}
-
-	// Remove empty directories (walk bottom-up)
-	if err := removeEmptyDirs(c.Unpm.Out); err != nil {
-		return fmt.Errorf("cleaning empty directories: %w", err)
-	}
-
-	if len(toDelete) == 0 {
-		fmt.Println("  nothing to prune")
-	}
-
-	return nil
-}
-
 // readEntryPoints reads importmap.json from the vendor directory and returns a
-// map of import key -> relative path within outDir. Since fetch rewrites all
+// map of import key -> relative path within outDir. Since vendor rewrites all
 // imports to relative paths, walking from these entry points is sufficient to
 // reach every vendored file.
 func readEntryPoints(c *cfg.Config) (map[string]string, error) {
 	outDir := c.Unpm.Out
 	data, err := os.ReadFile(filepath.Join(outDir, "importmap.json"))
 	if err != nil {
-		return nil, fmt.Errorf("reading importmap.json: %w (run 'unpm fetch' first)", err)
+		return nil, fmt.Errorf("reading importmap.json: %w (run 'unpm vendor' first)", err)
 	}
 
 	var im struct {

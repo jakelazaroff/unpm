@@ -28,7 +28,7 @@ func (s *stringSlice) Set(v string) error {
 func main() {
 	// print help if necessary
 	if len(os.Args) < 2 || os.Args[1] == "help" {
-		fmt.Fprintf(os.Stderr, "usage: unpm <command> [flags]\n\ncommands:\n  fetch   download and vendor imports\n  check   warn about import map issues\n  prune   remove unreachable vendored files\n  why     explain why a file is vendored\n")
+		fmt.Fprintf(os.Stderr, "usage: unpm <command> [flags]\n\ncommands:\n  vendor  download and vendor imports\n  check   warn about import map issues\n  why     explain why a file is vendored\n")
 		os.Exit(1)
 	}
 
@@ -66,7 +66,7 @@ func main() {
 
 	// ensure the command is valid
 	switch cmd {
-	case "fetch", "check", "prune", "why":
+	case "vendor", "check", "why":
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
 		os.Exit(1)
@@ -90,9 +90,9 @@ func main() {
 
 	// run the command
 	switch cmd {
-	case "fetch":
-		fmt.Println("unpm: fetching imports...")
-		if err := unpm.Fetch(c); err != nil {
+	case "vendor":
+		fmt.Println("unpm: vendoring imports...")
+		if err := unpm.Vendor(c); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
@@ -101,14 +101,6 @@ func main() {
 	case "check":
 		fmt.Println("unpm: checking imports...")
 		if err := unpm.Check(c); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("done.")
-
-	case "prune":
-		fmt.Println("unpm: pruning vendor...")
-		if err := unpm.Prune(c); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
