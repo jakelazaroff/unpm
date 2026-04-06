@@ -42,7 +42,7 @@ func main() {
 	fs.StringVar(&config, "config", "unpm.json", "path to config JSON file")
 	fs.StringVar(&out, "out", "", "output directory")
 	fs.StringVar(&root, "root", "", "root directory for import map paths")
-	fs.Var(&pin, "pin", "pin a module specifier (can be repeated)")
+	fs.Var(&pin, "pin", "pin a file relative to the output directory (can be repeated)")
 	// reorder args so flags can appear anywhere
 	args := os.Args[2:]
 	var flagArgs, posArgs []string

@@ -310,28 +310,41 @@ func TestFetch_Pin(t *testing.T) {
 	})
 	defer srv.Close()
 
-	outDir := filepath.Join(t.TempDir(), "vendor")
+	host := strings.TrimPrefix(srv.URL, "http://")
+	root := t.TempDir()
+	outDir := filepath.Join(root, "vendor")
+
+	// Pre-create b.js with local modifications
+	os.MkdirAll(filepath.Join(outDir, host), 0o755)
+	os.WriteFile(filepath.Join(outDir, host, "b.js"), []byte(`export const b = "local";`), 0o644)
+
 	c := &cfg.Config{
 		Imports: map[string]string{
 			"a": srv.URL + "/a.js",
 			"b": srv.URL + "/b.js",
 		},
-		Unpm: cfg.Options{Out: outDir, Root: t.TempDir(), Pin: []string{"b"}},
+		Unpm: cfg.Options{Out: outDir, Root: root, Pin: []string{host + "/b.js"}},
 	}
 	if err := unpm.Fetch(c); err != nil {
 		t.Fatal(err)
 	}
 
-	host := strings.TrimPrefix(srv.URL, "http://")
-
-	// a.js should exist
-	if _, err := os.Stat(filepath.Join(outDir, host, "a.js")); err != nil {
+	// a.js should be downloaded from the server
+	data, err := os.ReadFile(filepath.Join(outDir, host, "a.js"))
+	if err != nil {
 		t.Fatal("a.js should be downloaded")
 	}
+	if string(data) != `export const a = 1;` {
+		t.Fatalf("a.js has unexpected content: %s", data)
+	}
 
-	// b.js should NOT exist (pinned)
-	if _, err := os.Stat(filepath.Join(outDir, host, "b.js")); err == nil {
-		t.Fatal("b.js should not be downloaded (pinned)")
+	// b.js should still have its local content (pinned)
+	data, err = os.ReadFile(filepath.Join(outDir, host, "b.js"))
+	if err != nil {
+		t.Fatal("b.js should still exist")
+	}
+	if string(data) != `export const b = "local";` {
+		t.Fatalf("b.js should not be overwritten (pinned), got: %s", data)
 	}
 }
 
@@ -347,13 +360,13 @@ func TestCheck(t *testing.T) {
 
 	// Write generated files so check doesn't warn about them
 	os.WriteFile(filepath.Join(outDir, "importmap.js"), []byte(""), 0o644)
-	os.WriteFile(filepath.Join(outDir, "importmap.json"), []byte("{}"), 0o644)
+	os.WriteFile(filepath.Join(outDir, "importmap.json"), []byte(`{"imports":{"a":"/example.com/a.js"}}`), 0o644)
 	os.WriteFile(filepath.Join(outDir, "jsconfig.json"), []byte("{}"), 0o644)
 
 	t.Run("passing", func(t *testing.T) {
 		c := &cfg.Config{
 			Imports: map[string]string{"a": "https://example.com/a.js"},
-			Unpm:    cfg.Options{Out: outDir},
+			Unpm:    cfg.Options{Out: outDir, Root: outDir},
 		}
 		if err := unpm.Check(c); err != nil {
 			t.Fatalf("expected check to pass: %v", err)
@@ -361,24 +374,28 @@ func TestCheck(t *testing.T) {
 	})
 
 	t.Run("missing file on disk", func(t *testing.T) {
+		os.WriteFile(filepath.Join(outDir, "importmap.json"), []byte(`{"imports":{"a":"/example.com/a.js","missing":"/example.com/missing.js"}}`), 0o644)
 		c := &cfg.Config{
 			Imports: map[string]string{
 				"a":       "https://example.com/a.js",
 				"missing": "https://example.com/missing.js",
 			},
-			Unpm: cfg.Options{Out: outDir},
+			Unpm: cfg.Options{Out: outDir, Root: outDir},
 		}
 		err := unpm.Check(c)
 		if err == nil {
 			t.Fatal("expected check to fail for missing file")
 		}
+		// Restore importmap for subsequent tests
+		os.WriteFile(filepath.Join(outDir, "importmap.json"), []byte(`{"imports":{"a":"/example.com/a.js"}}`), 0o644)
 	})
 
 	t.Run("bare import not in map", func(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, "c.js"), []byte(`import { x } from "unknown-pkg"; export const c = x;`), 0o644)
+		os.WriteFile(filepath.Join(outDir, "importmap.json"), []byte(`{"imports":{"c":"/example.com/c.js"}}`), 0o644)
 		c := &cfg.Config{
 			Imports: map[string]string{"c": "https://example.com/c.js"},
-			Unpm:    cfg.Options{Out: outDir},
+			Unpm:    cfg.Options{Out: outDir, Root: outDir},
 		}
 		err := unpm.Check(c)
 		if err == nil {
@@ -407,12 +424,12 @@ func TestPrune(t *testing.T) {
 
 	// Write generated files
 	os.WriteFile(filepath.Join(outDir, "importmap.js"), []byte(""), 0o644)
-	os.WriteFile(filepath.Join(outDir, "importmap.json"), []byte("{}"), 0o644)
+	os.WriteFile(filepath.Join(outDir, "importmap.json"), []byte(`{"imports":{"a":"/example.com/a.js"}}`), 0o644)
 	os.WriteFile(filepath.Join(outDir, "jsconfig.json"), []byte("{}"), 0o644)
 
 	c := &cfg.Config{
 		Imports: map[string]string{"a": "https://example.com/a.js"},
-		Unpm:    cfg.Options{Out: outDir},
+		Unpm:    cfg.Options{Out: outDir, Root: outDir},
 	}
 	if err := unpm.Prune(c); err != nil {
 		t.Fatal(err)
@@ -448,10 +465,11 @@ func TestWhy(t *testing.T) {
 	os.MkdirAll(dir, 0o755)
 	os.WriteFile(filepath.Join(dir, "entry.js"), []byte(`import { dep } from "./dep.js"; export default dep;`), 0o644)
 	os.WriteFile(filepath.Join(dir, "dep.js"), []byte(`export const dep = 1;`), 0o644)
+	os.WriteFile(filepath.Join(outDir, "importmap.json"), []byte(`{"imports":{"entry":"/example.com/entry.js"}}`), 0o644)
 
 	c := &cfg.Config{
 		Imports: map[string]string{"entry": "https://example.com/entry.js"},
-		Unpm:    cfg.Options{Out: outDir},
+		Unpm:    cfg.Options{Out: outDir, Root: outDir},
 	}
 
 	// Should find the chain

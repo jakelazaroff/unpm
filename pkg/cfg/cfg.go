@@ -66,7 +66,8 @@ func ReadConfig(configPath string) (*Config, error) {
 	return &cfg, nil
 }
 
-// IsPinned reports whether the given import key is pinned.
-func (c *Config) IsPinned(key string) bool {
-	return slices.Contains(c.Unpm.Pin, key)
+// IsPinned reports whether the given file path (relative to the output
+// directory) is pinned.
+func (c *Config) IsPinned(relPath string) bool {
+	return slices.Contains(c.Unpm.Pin, relPath)
 }

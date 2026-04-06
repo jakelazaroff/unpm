@@ -16,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -27,6 +28,7 @@ type vendorer struct {
 	downloaded map[string]string // full URL -> path relative to outDir
 	types      map[string]string // full URL -> types path relative to outDir (from x-typescript-types)
 	esmPaths   map[string]string // x-esm-path value -> path relative to outDir
+	pinned     []string          // file paths relative to outDir that should not be overwritten
 }
 
 func Fetch(c *cfg.Config) error {
@@ -35,14 +37,12 @@ func Fetch(c *cfg.Config) error {
 		downloaded: make(map[string]string),
 		types:      make(map[string]string),
 		esmPaths:   make(map[string]string),
+		pinned:     c.Unpm.Pin,
 	}
 
 	// Download all imports; relPath is relative to outDir
 	downloaded := make(map[string]string) // import key -> relPath within outDir
 	for key, rawURL := range c.Imports {
-		if c.IsPinned(key) {
-			continue
-		}
 		relPath, err := v.download(rawURL)
 		if err != nil {
 			return fmt.Errorf("downloading %q: %w", key, err)
@@ -69,9 +69,6 @@ func Fetch(c *cfg.Config) error {
 	// Use x-typescript-types if available, otherwise fall back to the JS file itself.
 	typesMap := make(map[string]string)
 	for key, rawURL := range c.Imports {
-		if c.IsPinned(key) {
-			continue
-		}
 		if typesRel, ok := v.types[rawURL]; ok {
 			typesMap[key] = "./" + typesRel
 		} else {
@@ -126,10 +123,15 @@ func Check(c *cfg.Config) error {
 	}
 
 	// 2. Error: import map entries with no corresponding file on disk.
-	for key, rawURL := range c.Imports {
-		relPath, err := resolveVendorPath(rawURL, c.Unpm.Out)
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("%q (%s): %v", key, rawURL, err))
+	// 3. Warning: files on disk not reachable from any import map entry.
+	entryPoints, err := readEntryPoints(c)
+	if err != nil {
+		return err
+	}
+	for key := range c.Imports {
+		relPath, ok := entryPoints[key]
+		if !ok {
+			errors = append(errors, fmt.Sprintf("%q: not found in importmap.json (run 'unpm fetch')", key))
 			continue
 		}
 		absPath := filepath.Join(c.Unpm.Out, filepath.FromSlash(relPath))
@@ -138,17 +140,12 @@ func Check(c *cfg.Config) error {
 		}
 	}
 
-	// 3. Warning: files on disk not reachable from any import map entry.
 	reachable := map[string]bool{
 		filepath.Clean(filepath.Join(c.Unpm.Out, "importmap.js")):   true,
 		filepath.Clean(filepath.Join(c.Unpm.Out, "importmap.json")): true,
 		filepath.Clean(filepath.Join(c.Unpm.Out, "jsconfig.json")):  true,
 	}
-	for key, rawURL := range c.Imports {
-		relPath, err := resolveVendorPath(rawURL, c.Unpm.Out)
-		if err != nil {
-			continue // already reported above
-		}
+	for key, relPath := range entryPoints {
 		if err := walkImports(c.Unpm.Out, relPath, reachable); err != nil {
 			fmt.Fprintf(os.Stderr, "  \033[33mwarning:\033[0m could not walk imports for %q: %v\n", key, err)
 		}
@@ -236,12 +233,13 @@ func Why(c *cfg.Config, target string) error {
 	target = filepath.ToSlash(target)
 	target = strings.TrimPrefix(target, filepath.ToSlash(c.Unpm.Out)+"/")
 
+	entryPoints, err := readEntryPoints(c)
+	if err != nil {
+		return err
+	}
+
 	// BFS from each entry point to find the shortest import chain to target
-	for key, rawURL := range c.Imports {
-		relPath, err := resolveVendorPath(rawURL, c.Unpm.Out)
-		if err != nil {
-			continue
-		}
+	for key, relPath := range entryPoints {
 
 		chain := findImportChain(c.Unpm.Out, relPath, target)
 		if chain != nil {
@@ -312,17 +310,17 @@ var allImportRe = regexp.MustCompile(`(?:\b(?:import|export)\s*(?:[^"']*\bfrom\s
 
 func Prune(c *cfg.Config) error {
 	// Walk the import graph from entry points to find all reachable files.
+	entryPoints, err := readEntryPoints(c)
+	if err != nil {
+		return err
+	}
 	reachable := map[string]bool{
 		// Generated outputs of fetch are always reachable.
 		filepath.Clean(filepath.Join(c.Unpm.Out, "importmap.js")):   true,
 		filepath.Clean(filepath.Join(c.Unpm.Out, "importmap.json")): true,
 		filepath.Clean(filepath.Join(c.Unpm.Out, "jsconfig.json")):  true,
 	}
-	for key, rawURL := range c.Imports {
-		relPath, err := resolveVendorPath(rawURL, c.Unpm.Out)
-		if err != nil {
-			return fmt.Errorf("resolving %q: %w", key, err)
-		}
+	for _, relPath := range entryPoints {
 		if err := walkImports(c.Unpm.Out, relPath, reachable); err != nil {
 			return err
 		}
@@ -330,7 +328,7 @@ func Prune(c *cfg.Config) error {
 
 	// Collect all files in the vendor directory
 	var toDelete []string
-	err := filepath.Walk(c.Unpm.Out, func(p string, info os.FileInfo, err error) error {
+	err = filepath.Walk(c.Unpm.Out, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -365,37 +363,37 @@ func Prune(c *cfg.Config) error {
 	return nil
 }
 
-// resolveVendorPath figures out the relative vendor path for a URL by looking
-// at what's on disk. For URLs with a file extension the path is deterministic;
-// for others (e.g. "https://esm.sh/preact@10.19.3") the filename was chosen at
-// fetch time, so we find whatever file exists in the expected directory.
-func resolveVendorPath(rawURL, outDir string) (string, error) {
-	u, err := url.Parse(rawURL)
+// readEntryPoints reads importmap.json from the vendor directory and returns a
+// map of import key -> relative path within outDir. Since fetch rewrites all
+// imports to relative paths, walking from these entry points is sufficient to
+// reach every vendored file.
+func readEntryPoints(c *cfg.Config) (map[string]string, error) {
+	outDir := c.Unpm.Out
+	data, err := os.ReadFile(filepath.Join(outDir, "importmap.json"))
 	if err != nil {
-		return "", fmt.Errorf("parsing URL: %w", err)
+		return nil, fmt.Errorf("reading importmap.json: %w (run 'unpm fetch' first)", err)
 	}
 
-	ext := strings.ToLower(path.Ext(u.Path))
-	switch ext {
-	case ".js", ".mjs", ".mts", ".ts", ".css", ".json", ".wasm", ".map":
-		return filepath.ToSlash(filepath.Join(u.Host, filepath.FromSlash(u.Path))), nil
+	var im struct {
+		Imports map[string]string `json:"imports"`
+	}
+	if err := json.Unmarshal(data, &im); err != nil {
+		return nil, fmt.Errorf("parsing importmap.json: %w", err)
 	}
 
-	// No file extension — look for the file in the expected directory
-	dir := filepath.Join(outDir, u.Host, filepath.FromSlash(u.Path))
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", fmt.Errorf("reading directory %s: %w (run 'unpm fetch' first)", dir, err)
-	}
-
-	for _, e := range entries {
-		if !e.IsDir() {
-			rel, _ := filepath.Rel(outDir, filepath.Join(dir, e.Name()))
-			return filepath.ToSlash(rel), nil
+	// Convert absolute paths (e.g. "/vendor/esm.sh/...") to paths relative to outDir
+	result := make(map[string]string)
+	for key, absPath := range im.Imports {
+		// absPath is root-relative; resolve it against the config's root directory
+		full := filepath.Join(c.Unpm.Root, filepath.FromSlash(absPath))
+		rel, err := filepath.Rel(outDir, full)
+		if err != nil {
+			return nil, fmt.Errorf("computing relative path for %q: %w", key, err)
 		}
+		result[key] = filepath.ToSlash(rel)
 	}
 
-	return "", fmt.Errorf("no vendored file found in %s", dir)
+	return result, nil
 }
 
 // walkImports recursively follows relative imports from a file, adding each to the reachable set.
@@ -548,25 +546,30 @@ func (v *vendorer) download(rawURL string) (string, error) {
 		return "", fmt.Errorf("reading %s: %w", fullURL, err)
 	}
 
-	content := string(body)
+	// If the file is pinned, skip writing (preserve local modifications).
+	if slices.Contains(v.pinned, rel) {
+		fmt.Printf("  %s -> %s (pinned)\n", fullURL, rel)
+	} else {
+		content := string(body)
 
-	// Only rewrite imports and source maps in code files, not in .map files
-	if strings.ToLower(path.Ext(u.Path)) != ".map" {
-		// Find and recursively download origin-relative and relative imports, rewriting paths
-		content, err = v.rewriteImports(content, rel, fullURL)
-		if err != nil {
-			return "", fmt.Errorf("rewriting imports in %s: %w", fullURL, err)
+		// Only rewrite imports and source maps in code files, not in .map files
+		if strings.ToLower(path.Ext(u.Path)) != ".map" {
+			// Find and recursively download origin-relative and relative imports, rewriting paths
+			content, err = v.rewriteImports(content, rel, fullURL)
+			if err != nil {
+				return "", fmt.Errorf("rewriting imports in %s: %w", fullURL, err)
+			}
+
+			// Download source maps referenced by //# sourceMappingURL=...
+			content = v.rewriteSourceMap(content, rel, fullURL)
 		}
 
-		// Download source maps referenced by //# sourceMappingURL=...
-		content = v.rewriteSourceMap(content, rel, fullURL)
-	}
+		if err := os.WriteFile(destPath, []byte(content), 0o644); err != nil {
+			return "", fmt.Errorf("writing %s: %w", destPath, err)
+		}
 
-	if err := os.WriteFile(destPath, []byte(content), 0o644); err != nil {
-		return "", fmt.Errorf("writing %s: %w", destPath, err)
+		fmt.Printf("  %s -> %s\n", fullURL, rel)
 	}
-
-	fmt.Printf("  %s -> %s\n", fullURL, rel)
 
 	// If the response includes type definitions, download them too
 	if typesURL := resp.Header.Get("x-typescript-types"); typesURL != "" {
