@@ -10,8 +10,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
-	"slices"
 	"strings"
 )
 
@@ -67,7 +67,52 @@ func ReadConfig(configPath string) (*Config, error) {
 }
 
 // IsPinned reports whether the given file path (relative to the output
-// directory) is pinned.
+// directory) matches any pin glob pattern.
 func (c *Config) IsPinned(relPath string) bool {
-	return slices.Contains(c.Unpm.Pin, relPath)
+	for _, pattern := range c.Unpm.Pin {
+		if matchGlob(pattern, relPath) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchGlob matches a glob pattern against a forward-slash path. It supports
+// path.Match syntax plus "**" to match zero or more path segments.
+func matchGlob(pattern, name string) bool {
+	patParts := strings.Split(pattern, "/")
+	nameParts := strings.Split(name, "/")
+	return matchParts(patParts, nameParts)
+}
+
+func matchParts(pat, name []string) bool {
+	for len(pat) > 0 {
+		if pat[0] == "**" {
+			pat = pat[1:]
+			if len(pat) == 0 {
+				return true // trailing ** matches everything
+			}
+			// Try matching the rest of the pattern at every position
+			for i := 0; i <= len(name); i++ {
+				if matchParts(pat, name[i:]) {
+					return true
+				}
+			}
+			return false
+		}
+
+		if len(name) == 0 {
+			return false
+		}
+
+		matched, _ := path.Match(pat[0], name[0])
+		if !matched {
+			return false
+		}
+
+		pat = pat[1:]
+		name = name[1:]
+	}
+
+	return len(name) == 0
 }

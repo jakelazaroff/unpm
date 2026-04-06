@@ -311,41 +311,76 @@ func TestVendor_Pin(t *testing.T) {
 	defer srv.Close()
 
 	host := strings.TrimPrefix(srv.URL, "http://")
-	root := t.TempDir()
-	outDir := filepath.Join(root, "vendor")
 
-	// Pre-create b.js with local modifications
-	os.MkdirAll(filepath.Join(outDir, host), 0o755)
-	os.WriteFile(filepath.Join(outDir, host, "b.js"), []byte(`export const b = "local";`), 0o644)
+	t.Run("exact path", func(t *testing.T) {
+		root := t.TempDir()
+		outDir := filepath.Join(root, "vendor")
 
-	c := &cfg.Config{
-		Imports: map[string]string{
-			"a": srv.URL + "/a.js",
-			"b": srv.URL + "/b.js",
-		},
-		Unpm: cfg.Options{Out: outDir, Root: root, Pin: []string{host + "/b.js"}},
-	}
-	if err := unpm.Vendor(c); err != nil {
-		t.Fatal(err)
-	}
+		// Pre-create b.js with local modifications
+		os.MkdirAll(filepath.Join(outDir, host), 0o755)
+		os.WriteFile(filepath.Join(outDir, host, "b.js"), []byte(`export const b = "local";`), 0o644)
 
-	// a.js should be downloaded from the server
-	data, err := os.ReadFile(filepath.Join(outDir, host, "a.js"))
-	if err != nil {
-		t.Fatal("a.js should be downloaded")
-	}
-	if string(data) != `export const a = 1;` {
-		t.Fatalf("a.js has unexpected content: %s", data)
-	}
+		c := &cfg.Config{
+			Imports: map[string]string{
+				"a": srv.URL + "/a.js",
+				"b": srv.URL + "/b.js",
+			},
+			Unpm: cfg.Options{Out: outDir, Root: root, Pin: []string{host + "/b.js"}},
+		}
+		if err := unpm.Vendor(c); err != nil {
+			t.Fatal(err)
+		}
 
-	// b.js should still have its local content (pinned)
-	data, err = os.ReadFile(filepath.Join(outDir, host, "b.js"))
-	if err != nil {
-		t.Fatal("b.js should still exist")
-	}
-	if string(data) != `export const b = "local";` {
-		t.Fatalf("b.js should not be overwritten (pinned), got: %s", data)
-	}
+		// a.js should be downloaded from the server
+		data, err := os.ReadFile(filepath.Join(outDir, host, "a.js"))
+		if err != nil {
+			t.Fatal("a.js should be downloaded")
+		}
+		if string(data) != `export const a = 1;` {
+			t.Fatalf("a.js has unexpected content: %s", data)
+		}
+
+		// b.js should still have its local content (pinned)
+		data, err = os.ReadFile(filepath.Join(outDir, host, "b.js"))
+		if err != nil {
+			t.Fatal("b.js should still exist")
+		}
+		if string(data) != `export const b = "local";` {
+			t.Fatalf("b.js should not be overwritten (pinned), got: %s", data)
+		}
+	})
+
+	t.Run("glob pattern", func(t *testing.T) {
+		root := t.TempDir()
+		outDir := filepath.Join(root, "vendor")
+
+		// Pre-create both files with local modifications
+		os.MkdirAll(filepath.Join(outDir, host), 0o755)
+		os.WriteFile(filepath.Join(outDir, host, "a.js"), []byte(`export const a = "local a";`), 0o644)
+		os.WriteFile(filepath.Join(outDir, host, "b.js"), []byte(`export const b = "local b";`), 0o644)
+
+		c := &cfg.Config{
+			Imports: map[string]string{
+				"a": srv.URL + "/a.js",
+				"b": srv.URL + "/b.js",
+			},
+			Unpm: cfg.Options{Out: outDir, Root: root, Pin: []string{host + "/**"}},
+		}
+		if err := unpm.Vendor(c); err != nil {
+			t.Fatal(err)
+		}
+
+		// Both files should still have their local content (glob pinned)
+		for _, name := range []string{"a.js", "b.js"} {
+			data, err := os.ReadFile(filepath.Join(outDir, host, name))
+			if err != nil {
+				t.Fatalf("%s should still exist", name)
+			}
+			if !strings.Contains(string(data), "local") {
+				t.Fatalf("%s should not be overwritten (pinned), got: %s", name, data)
+			}
+		}
+	})
 }
 
 func TestCheck(t *testing.T) {

@@ -16,7 +16,6 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"sort"
 	"strings"
 
@@ -24,25 +23,25 @@ import (
 )
 
 type vendorer struct {
+	config     *cfg.Config
 	outDir     string
 	downloaded map[string]string // full URL -> path relative to outDir
 	types      map[string]string // full URL -> types path relative to outDir (from x-typescript-types)
 	esmPaths   map[string]string // x-esm-path value -> path relative to outDir
-	pinned     []string          // file paths relative to outDir that should not be overwritten
 }
 
 func Vendor(c *cfg.Config) error {
 	// Clean the output directory, preserving pinned files.
-	if err := cleanOutDir(c.Unpm.Out, c.Unpm.Pin); err != nil {
+	if err := cleanOutDir(c); err != nil {
 		return err
 	}
 
 	v := &vendorer{
+		config:     c,
 		outDir:     c.Unpm.Out,
 		downloaded: make(map[string]string),
 		types:      make(map[string]string),
 		esmPaths:   make(map[string]string),
-		pinned:     c.Unpm.Pin,
 	}
 
 	// Download all imports; relPath is relative to outDir
@@ -90,9 +89,10 @@ func Vendor(c *cfg.Config) error {
 	return nil
 }
 
-// cleanOutDir removes all files in outDir except those whose path (relative to
-// outDir) is in the pinned list, then removes any empty directories.
-func cleanOutDir(outDir string, pinned []string) error {
+// cleanOutDir removes all files in outDir except those matching a pin glob,
+// then removes any empty directories.
+func cleanOutDir(c *cfg.Config) error {
+	outDir := c.Unpm.Out
 	if _, err := os.Stat(outDir); os.IsNotExist(err) {
 		return nil
 	}
@@ -104,7 +104,7 @@ func cleanOutDir(outDir string, pinned []string) error {
 		}
 		rel, _ := filepath.Rel(outDir, p)
 		rel = filepath.ToSlash(rel)
-		if !slices.Contains(pinned, rel) {
+		if !c.IsPinned(rel) {
 			toDelete = append(toDelete, p)
 		}
 		return nil
@@ -533,7 +533,7 @@ func (v *vendorer) download(rawURL string) (string, error) {
 	}
 
 	// If the file is pinned, skip writing (preserve local modifications).
-	if slices.Contains(v.pinned, rel) {
+	if v.config.IsPinned(rel) {
 		fmt.Printf("  %s -> %s (pinned)\n", fullURL, rel)
 	} else {
 		content := string(body)

@@ -99,18 +99,31 @@ func TestReadConfig(t *testing.T) {
 }
 
 func TestIsPinned(t *testing.T) {
-	c := &cfg.Config{
-		Imports: map[string]string{
-			"a": "https://x.com/a.js",
-			"b": "https://x.com/b.js",
-		},
-		Unpm: cfg.Options{Pin: []string{"b"}},
+	tests := []struct {
+		name     string
+		pin      []string
+		path     string
+		expected bool
+	}{
+		{"exact match", []string{"esm.sh/preact.js"}, "esm.sh/preact.js", true},
+		{"exact no match", []string{"esm.sh/preact.js"}, "esm.sh/other.js", false},
+		{"star in segment", []string{"esm.sh/*.js"}, "esm.sh/preact.js", true},
+		{"star does not cross slash", []string{"esm.sh/*.js"}, "esm.sh/sub/preact.js", false},
+		{"doublestar trailing", []string{"esm.sh/**"}, "esm.sh/preact.js", true},
+		{"doublestar nested", []string{"esm.sh/**"}, "esm.sh/v10/es2022/preact.mjs", true},
+		{"doublestar middle", []string{"esm.sh/**/preact.mjs"}, "esm.sh/v10/es2022/preact.mjs", true},
+		{"doublestar middle no match", []string{"esm.sh/**/preact.mjs"}, "esm.sh/v10/es2022/hooks.mjs", false},
+		{"doublestar zero segments", []string{"esm.sh/**/preact.mjs"}, "esm.sh/preact.mjs", true},
+		{"no match different host", []string{"esm.sh/**"}, "cdn.js/preact.js", false},
+		{"multiple patterns", []string{"esm.sh/**", "cdn.js/foo.js"}, "cdn.js/foo.js", true},
 	}
 
-	if c.IsPinned("a") {
-		t.Fatal("a should not be pinned")
-	}
-	if !c.IsPinned("b") {
-		t.Fatal("b should be pinned")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &cfg.Config{Unpm: cfg.Options{Pin: tt.pin}}
+			if got := c.IsPinned(tt.path); got != tt.expected {
+				t.Fatalf("IsPinned(%q) with pin=%v: got %v, want %v", tt.path, tt.pin, got, tt.expected)
+			}
+		})
 	}
 }

@@ -116,7 +116,7 @@ Unlike most package managers, unpm doesn't rely on an external package repositor
 
 - `out` specifies the directory to write any output files. Defaults to `./vendor`.
 - `root` specifies the path at which the output files are available on your website. Defaults to `/vendor`.
-- `pin` is a string array of file paths relative to the output directory. Any files in this array won't be removed or updated when running `unpm vendor`. Pinning is mostly useful when you've made local changes to a dependency that you don't want to be overwritten.
+- `pin` is a string array of glob patterns matching file paths relative to the output directory. Any matching files won't be removed or updated when running `unpm vendor`. Pinning is mostly useful when you've made local changes to a dependency that you don't want to be overwritten.
 
 To use `unpm.json` directly as an import map, remove the `$unpm` key — browser ignore unknown import map keys so it won't break anything, but there's no reason to keep it.
 
