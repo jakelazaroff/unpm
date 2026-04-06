@@ -28,12 +28,14 @@ type vendorer struct {
 	downloaded map[string]string // full URL -> path relative to outDir
 	types      map[string]string // full URL -> types path relative to outDir (from x-typescript-types)
 	esmPaths   map[string]string // x-esm-path value -> path relative to outDir
+	verbose    bool
+	warnings   []string
 }
 
-func Vendor(c *cfg.Config) error {
+func Vendor(c *cfg.Config) ([]string, error) {
 	// Clean the output directory, preserving pinned files.
 	if err := cleanOutDir(c); err != nil {
-		return err
+		return nil, err
 	}
 
 	v := &vendorer{
@@ -42,6 +44,7 @@ func Vendor(c *cfg.Config) error {
 		downloaded: make(map[string]string),
 		types:      make(map[string]string),
 		esmPaths:   make(map[string]string),
+		verbose:    c.Unpm.Verbose,
 	}
 
 	// Download all imports; relPath is relative to outDir
@@ -49,7 +52,7 @@ func Vendor(c *cfg.Config) error {
 	for key, rawURL := range c.Imports {
 		relPath, err := v.download(rawURL)
 		if err != nil {
-			return fmt.Errorf("downloading %q: %w", key, err)
+			return v.warnings, fmt.Errorf("downloading %q: %w", key, err)
 		}
 		downloaded[key] = relPath
 	}
@@ -60,13 +63,13 @@ func Vendor(c *cfg.Config) error {
 		absPath := filepath.Join(c.Unpm.Out, filepath.FromSlash(relPath))
 		fromRoot, err := filepath.Rel(c.Unpm.Root, absPath)
 		if err != nil {
-			return fmt.Errorf("computing relative path for %q: %w", key, err)
+			return v.warnings, fmt.Errorf("computing relative path for %q: %w", key, err)
 		}
 		rewritten[key] = "/" + filepath.ToSlash(fromRoot)
 	}
 
-	if err := writeImportMap(c.Unpm.Out, rewritten); err != nil {
-		return err
+	if err := writeImportMap(c.Unpm.Out, rewritten, c.Unpm.Verbose); err != nil {
+		return v.warnings, err
 	}
 
 	// Build types mapping: import key -> types path relative to outDir.
@@ -80,13 +83,13 @@ func Vendor(c *cfg.Config) error {
 		}
 	}
 
-	if err := writeTypesDts(c.Unpm.Out, typesMap); err != nil {
-		return err
+	if err := writeTypesDts(c.Unpm.Out, typesMap, c.Unpm.Verbose); err != nil {
+		return v.warnings, err
 	}
 
 	checkBareImports(c.Unpm.Out, c.Imports)
 
-	return nil
+	return v.warnings, nil
 }
 
 // cleanOutDir removes all files in outDir except those matching a pin glob,
@@ -188,7 +191,7 @@ func Check(c *cfg.Config) error {
 	}
 	for key, relPath := range entryPoints {
 		if err := walkImports(c.Unpm.Out, relPath, reachable); err != nil {
-			fmt.Fprintf(os.Stderr, "  \033[33mwarning:\033[0m could not walk imports for %q: %v\n", key, err)
+			fmt.Fprintf(os.Stderr, "\033[33mwarning:\033[0m could not walk imports for %q: %v\n", key, err)
 		}
 	}
 	var unreachable []string
@@ -203,19 +206,19 @@ func Check(c *cfg.Config) error {
 		return nil
 	})
 	for _, f := range unreachable {
-		fmt.Fprintf(os.Stderr, "  \033[33mwarning:\033[0m %s is not reachable from any import map entry\n", f)
+		fmt.Fprintf(os.Stderr, "\033[33mwarning:\033[0m %s is not reachable from any import map entry\n", f)
 	}
 
 	if len(errors) > 0 {
 		sort.Strings(errors)
 		for _, e := range errors {
-			fmt.Fprintf(os.Stderr, "  \033[31merror:\033[0m %s\n", e)
+			fmt.Fprintf(os.Stderr, "\033[31merror:\033[0m %s\n", e)
 		}
 		return fmt.Errorf("check failed with %d error(s)", len(errors))
 	}
 
 	if len(unreachable) == 0 {
-		fmt.Println("  all checks passed")
+		fmt.Println("all checks passed")
 	}
 
 	return nil
@@ -260,12 +263,11 @@ func checkBareImports(outDir string, imports map[string]string) {
 	})
 
 	if len(missing) == 0 {
-		fmt.Println("  no missing imports")
 		return
 	}
 
 	for spec, files := range missing {
-		fmt.Printf("  \033[33mwarning:\033[0m %q is imported by %s but missing from import map\n", spec, strings.Join(files, ", "))
+		fmt.Printf("\033[33mwarning:\033[0m %q is imported by %s but missing from import map\n", spec, strings.Join(files, ", "))
 	}
 }
 
@@ -284,7 +286,7 @@ func Why(c *cfg.Config, target string) error {
 
 		chain := findImportChain(c.Unpm.Out, relPath, target)
 		if chain != nil {
-			fmt.Printf("  %s", key)
+			fmt.Printf("%s", key)
 			for _, link := range chain {
 				fmt.Printf(" -> %s", link)
 			}
@@ -534,7 +536,9 @@ func (v *vendorer) download(rawURL string) (string, error) {
 
 	// If the file is pinned, skip writing (preserve local modifications).
 	if v.config.IsPinned(rel) {
-		fmt.Printf("  %s -> %s (pinned)\n", fullURL, rel)
+		if v.verbose {
+			fmt.Printf("%s -> %s (pinned)\n", fullURL, rel)
+		}
 	} else {
 		content := string(body)
 
@@ -554,7 +558,9 @@ func (v *vendorer) download(rawURL string) (string, error) {
 			return "", fmt.Errorf("writing %s: %w", destPath, err)
 		}
 
-		fmt.Printf("  %s -> %s\n", fullURL, rel)
+		if v.verbose {
+			fmt.Printf("%s -> %s\n", fullURL, rel)
+		}
 	}
 
 	// If the response includes type definitions, download them too
@@ -563,7 +569,7 @@ func (v *vendorer) download(rawURL string) (string, error) {
 			typesURL = u.Scheme + "://" + u.Host + typesURL
 		}
 		if typesRel, err := v.download(typesURL); err != nil {
-			fmt.Printf("  \033[33mwarning:\033[0m failed to download types for %s: %v\n", fullURL, err)
+			v.warnings = append(v.warnings, fmt.Sprintf("failed to download types for %s: %v", fullURL, err))
 		} else {
 			v.types[fullURL] = typesRel
 		}
@@ -651,7 +657,7 @@ func (v *vendorer) rewriteSourceMap(content, currentFileRel, currentURL string) 
 
 		mapRel, err := v.download(mapURL)
 		if err != nil {
-			fmt.Printf("  \033[33mwarning:\033[0m failed to download source map %s: %v\n", mapURL, err)
+			v.warnings = append(v.warnings, fmt.Sprintf("failed to download source map %s: %v", mapURL, err))
 			return match
 		}
 
@@ -665,7 +671,7 @@ func (v *vendorer) rewriteSourceMap(content, currentFileRel, currentURL string) 
 	})
 }
 
-func writeImportMap(outDir string, rewritten map[string]string) error {
+func writeImportMap(outDir string, rewritten map[string]string, verbose bool) error {
 	// Build the imports object as JS key-value pairs
 	var entries []string
 	for key, val := range rewritten {
@@ -688,7 +694,9 @@ document.currentScript.after(importmap);
 		return fmt.Errorf("writing importmap.js: %w", err)
 	}
 
-	fmt.Printf("  wrote %s\n", dest)
+	if verbose {
+		fmt.Printf("wrote %s\n", dest)
+	}
 
 	// Also write importmap.json for use with Node or SSR
 	jsonData, err := json.MarshalIndent(map[string]any{
@@ -703,11 +711,13 @@ document.currentScript.after(importmap);
 		return fmt.Errorf("writing importmap.json: %w", err)
 	}
 
-	fmt.Printf("  wrote %s\n", jsonDest)
+	if verbose {
+		fmt.Printf("wrote %s\n", jsonDest)
+	}
 	return nil
 }
 
-func writeTypesDts(dir string, types map[string]string) error {
+func writeTypesDts(dir string, types map[string]string, verbose bool) error {
 	if len(types) == 0 {
 		return nil
 	}
@@ -731,6 +741,8 @@ func writeTypesDts(dir string, types map[string]string) error {
 		return fmt.Errorf("writing jsconfig.json: %w", err)
 	}
 
-	fmt.Printf("  wrote %s\n", dest)
+	if verbose {
+		fmt.Printf("wrote %s\n", dest)
+	}
 	return nil
 }

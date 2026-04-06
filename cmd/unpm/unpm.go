@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/jakelazaroff/unpm/pkg/cfg"
 	"github.com/jakelazaroff/unpm/pkg/unpm"
@@ -38,11 +39,13 @@ func main() {
 	// get any flags
 	var config, out, root string
 	var pin stringSlice
+	var verbose bool
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	fs.StringVar(&config, "config", "unpm.json", "path to config JSON file")
 	fs.StringVar(&out, "out", "", "output directory")
 	fs.StringVar(&root, "root", "", "root directory for import map paths")
 	fs.Var(&pin, "pin", "pin a file relative to the output directory (can be repeated)")
+	fs.BoolVar(&verbose, "verbose", false, "show detailed output")
 	// reorder args so flags can appear anywhere
 	args := os.Args[2:]
 	var flagArgs, posArgs []string
@@ -87,19 +90,30 @@ func main() {
 		c.Unpm.Root = root
 	}
 	c.Unpm.Pin = append(c.Unpm.Pin, pin...)
+	c.Unpm.Verbose = verbose
 
 	// run the command
 	switch cmd {
 	case "vendor":
-		fmt.Println("unpm: vendoring imports...")
-		if err := unpm.Vendor(c); err != nil {
+		var stop func()
+		if !verbose {
+			stop = spinner()
+		}
+		warnings, err := unpm.Vendor(c)
+		if stop != nil {
+			stop()
+			fmt.Print("\r\033[K")
+		}
+		for _, w := range warnings {
+			fmt.Fprintf(os.Stderr, "\033[33mwarning:\033[0m %s\n", w)
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println("done.")
 
 	case "check":
-		fmt.Println("unpm: checking imports...")
 		if err := unpm.Check(c); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -116,4 +130,23 @@ func main() {
 			os.Exit(1)
 		}
 	}
+}
+
+func spinner() func() {
+	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	done := make(chan struct{})
+	go func() {
+		i := 0
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				fmt.Printf("\r%s", frames[i%len(frames)])
+				i++
+				time.Sleep(80 * time.Millisecond)
+			}
+		}
+	}()
+	return func() { close(done) }
 }

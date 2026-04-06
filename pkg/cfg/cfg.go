@@ -21,9 +21,10 @@ type Config struct {
 }
 
 type Options struct {
-	Out  string   `json:"out,omitempty"`
-	Root string   `json:"root,omitempty"`
-	Pin  []string `json:"pin,omitempty"`
+	Out     string   `json:"out,omitempty"`
+	Root    string   `json:"root,omitempty"`
+	Pin     []string `json:"pin,omitempty"`
+	Verbose bool     `json:"-"`
 }
 
 func ReadConfig(configPath string) (*Config, error) {

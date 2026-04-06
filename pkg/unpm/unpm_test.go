@@ -53,7 +53,7 @@ func TestVendor_SingleFile(t *testing.T) {
 		Imports: map[string]string{"mylib": srv.URL + "/mylib.js"},
 		Unpm:    cfg.Options{Out: outDir, Root: root},
 	}
-	if err := unpm.Vendor(c); err != nil {
+	if _, err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
 	}
 
@@ -106,7 +106,7 @@ func TestVendor_TransitiveDeps(t *testing.T) {
 		Imports: map[string]string{"a": srv.URL + "/a.js"},
 		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
 	}
-	if err := unpm.Vendor(c); err != nil {
+	if _, err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
 	}
 
@@ -139,7 +139,7 @@ func TestVendor_OriginRelativeImport(t *testing.T) {
 		Imports: map[string]string{"entry": srv.URL + "/entry.js"},
 		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
 	}
-	if err := unpm.Vendor(c); err != nil {
+	if _, err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
 	}
 
@@ -177,7 +177,7 @@ func TestVendor_ESMPath(t *testing.T) {
 		Imports: map[string]string{"preact": srv.URL + "/preact"},
 		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
 	}
-	if err := unpm.Vendor(c); err != nil {
+	if _, err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
 	}
 
@@ -217,7 +217,7 @@ func TestVendor_TypeScriptTypes(t *testing.T) {
 		Imports: map[string]string{"mylib": srv.URL + "/mylib.js"},
 		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
 	}
-	if err := unpm.Vendor(c); err != nil {
+	if _, err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
 	}
 
@@ -249,7 +249,7 @@ func TestVendor_SourceMap(t *testing.T) {
 		Imports: map[string]string{"app": srv.URL + "/app.js"},
 		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
 	}
-	if err := unpm.Vendor(c); err != nil {
+	if _, err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
 	}
 
@@ -281,7 +281,7 @@ func TestVendor_DynamicImport(t *testing.T) {
 		Imports: map[string]string{"entry": srv.URL + "/entry.js"},
 		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
 	}
-	if err := unpm.Vendor(c); err != nil {
+	if _, err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
 	}
 
@@ -327,7 +327,7 @@ func TestVendor_Pin(t *testing.T) {
 			},
 			Unpm: cfg.Options{Out: outDir, Root: root, Pin: []string{host + "/b.js"}},
 		}
-		if err := unpm.Vendor(c); err != nil {
+		if _, err := unpm.Vendor(c); err != nil {
 			t.Fatal(err)
 		}
 
@@ -366,7 +366,7 @@ func TestVendor_Pin(t *testing.T) {
 			},
 			Unpm: cfg.Options{Out: outDir, Root: root, Pin: []string{host + "/**"}},
 		}
-		if err := unpm.Vendor(c); err != nil {
+		if _, err := unpm.Vendor(c); err != nil {
 			t.Fatal(err)
 		}
 
@@ -459,7 +459,7 @@ func TestVendor_CleansOldFiles(t *testing.T) {
 		Imports: map[string]string{"a": srv.URL + "/a.js"},
 		Unpm:    cfg.Options{Out: outDir, Root: root},
 	}
-	if err := unpm.Vendor(c); err != nil {
+	if _, err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
 	}
 
