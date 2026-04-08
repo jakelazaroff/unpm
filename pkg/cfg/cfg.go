@@ -77,6 +77,7 @@ func (c *Config) IsPinned(relPath string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 

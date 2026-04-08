@@ -8,6 +8,7 @@ package unpm
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/jakelazaroff/unpm/pkg/cfg"
 )
@@ -33,9 +35,12 @@ type vendorer struct {
 }
 
 func Vendor(c *cfg.Config) ([]string, error) {
-	// Clean the output directory, preserving pinned files.
-	if err := cleanOutDir(c); err != nil {
-		return nil, err
+	// clean the output directory, preserving pinned files
+	out := c.Unpm.Out
+	if _, err := os.Stat(out); err == nil {
+		if _, err := clean(c, out); err != nil {
+			return []string{}, err
+		}
 	}
 
 	v := &vendorer{
@@ -87,41 +92,43 @@ func Vendor(c *cfg.Config) ([]string, error) {
 	return v.warnings, nil
 }
 
-// cleanOutDir removes all files in outDir except those matching a pin glob,
-// then removes any empty directories.
-func cleanOutDir(c *cfg.Config) error {
-	outDir := c.Unpm.Out
-	if _, err := os.Stat(outDir); os.IsNotExist(err) {
-		return nil
+// recursively remove a directory's children while leaving pinned files,
+// returning whether the cleaned directory should be deleted
+func clean(config *cfg.Config, path string) (bool, error) {
+	// if the file is pinned, don't clean it
+	relPath, _ := filepath.Rel(config.Unpm.Out, path)
+	if config.IsPinned(filepath.ToSlash(relPath)) {
+		return false, nil
 	}
 
-	var toDelete []string
-	err := filepath.Walk(outDir, func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		rel, _ := filepath.Rel(outDir, p)
-		rel = filepath.ToSlash(rel)
-		if !c.IsPinned(rel) {
-			toDelete = append(toDelete, p)
-		}
-		return nil
-	})
+	// if the path is a leaf file, it should be deleted
+	entries, err := os.ReadDir(path)
 	if err != nil {
-		return fmt.Errorf("walking output directory: %w", err)
+		if errors.Is(err, syscall.ENOTDIR) {
+			return true, nil
+		}
+
+		return false, err
 	}
 
-	for _, p := range toDelete {
-		if err := os.Remove(p); err != nil {
-			return fmt.Errorf("removing %s: %w", p, err)
+	// iterate through the directory, removing any files and now-empty child directories
+	empty := true
+	for _, entry := range entries {
+		child := filepath.Join(path, entry.Name())
+		delete, err := clean(config, child)
+		if err != nil {
+			return false, err
+		}
+
+		empty = empty && delete
+		if delete {
+			if err := os.Remove(child); err != nil {
+				return false, err
+			}
 		}
 	}
 
-	if err := removeEmptyDirs(outDir); err != nil {
-		return fmt.Errorf("cleaning empty directories: %w", err)
-	}
-
-	return nil
+	return empty, nil
 }
 
 func Check(c *cfg.Config) error {
@@ -415,35 +422,6 @@ func walkImports(outDir, relPath string, reachable map[string]bool) error {
 		reachable[mapPath] = true
 	}
 
-	return nil
-}
-
-func removeEmptyDirs(root string) error {
-	// Walk bottom-up by collecting dirs first, then checking in reverse
-	var dirs []string
-	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() && p != root {
-			dirs = append(dirs, p)
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	// Process deepest directories first
-	for i := len(dirs) - 1; i >= 0; i-- {
-		entries, err := os.ReadDir(dirs[i])
-		if err != nil {
-			continue
-		}
-		if len(entries) == 0 {
-			os.Remove(dirs[i])
-		}
-	}
 	return nil
 }
 
