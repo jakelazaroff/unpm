@@ -45,11 +45,9 @@ func Vendor(c *cfg.Config) ([]string, error) {
 
 	v := &vendorer{
 		config:     c,
-		outDir:     c.Unpm.Out,
 		downloaded: make(map[string]string),
 		types:      make(map[string]string),
 		esmPaths:   make(map[string]string),
-		verbose:    c.Unpm.Verbose,
 	}
 
 	// Download all imports; relPath is relative to outDir
@@ -500,13 +498,13 @@ func (v *vendorer) download(rawURL string) (string, error) {
 		}
 	}
 
-	dir := filepath.Join(v.outDir, filepath.FromSlash(localDir))
+	dir := filepath.Join(v.config.Unpm.Out, filepath.FromSlash(localDir))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("creating directory %s: %w", dir, err)
 	}
 
 	destPath := filepath.Join(dir, filename)
-	rel, _ := filepath.Rel(v.outDir, destPath)
+	rel, _ := filepath.Rel(v.config.Unpm.Out, destPath)
 	rel = filepath.ToSlash(rel)
 
 	// Register before recursing to prevent cycles
@@ -519,7 +517,7 @@ func (v *vendorer) download(rawURL string) (string, error) {
 
 	// If the file is pinned, skip writing (preserve local modifications).
 	if v.config.IsPinned(rel) {
-		if v.verbose {
+		if v.config.Unpm.Verbose {
 			fmt.Printf("%s -> %s (pinned)\n", fullURL, rel)
 		}
 	} else {
@@ -541,7 +539,7 @@ func (v *vendorer) download(rawURL string) (string, error) {
 			return "", fmt.Errorf("writing %s: %w", destPath, err)
 		}
 
-		if v.verbose {
+		if v.config.Unpm.Verbose {
 			fmt.Printf("%s -> %s\n", fullURL, rel)
 		}
 	}
