@@ -75,15 +75,15 @@ func TestReadConfig(t *testing.T) {
 		if c.Unpm.Out != filepath.Join(dir, "vendor") {
 			t.Fatalf("expected Out=%q, got %q", filepath.Join(dir, "vendor"), c.Unpm.Out)
 		}
-		if c.Unpm.Root != dir {
-			t.Fatalf("expected Root=%q, got %q", dir, c.Unpm.Root)
+		if c.Unpm.Root != "/vendor" {
+			t.Fatalf("expected Root=%q, got %q", "/vendor", c.Unpm.Root)
 		}
 	})
 
 	t.Run("custom out and root", func(t *testing.T) {
 		dir := t.TempDir()
 		p := filepath.Join(dir, "unpm.json")
-		os.WriteFile(p, []byte(`{"imports":{"foo":"https://example.com/foo.js"},"$unpm":{"out":"dist","root":"public"}}`), 0o644)
+		os.WriteFile(p, []byte(`{"imports":{"foo":"https://example.com/foo.js"},"$unpm":{"out":"dist","root":"/assets/dist"}}`), 0o644)
 
 		c, err := cfg.ReadConfig(p)
 		if err != nil {
@@ -92,8 +92,8 @@ func TestReadConfig(t *testing.T) {
 		if c.Unpm.Out != filepath.Join(dir, "dist") {
 			t.Fatalf("expected Out=%q, got %q", filepath.Join(dir, "dist"), c.Unpm.Out)
 		}
-		if c.Unpm.Root != filepath.Join(dir, "public") {
-			t.Fatalf("expected Root=%q, got %q", filepath.Join(dir, "public"), c.Unpm.Root)
+		if c.Unpm.Root != "/assets/dist" {
+			t.Fatalf("expected Root=%q, got %q", "/assets/dist", c.Unpm.Root)
 		}
 	})
 }

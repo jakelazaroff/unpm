@@ -60,12 +60,7 @@ func Vendor(c *cfg.Config) ([]string, error) {
 	// Compute absolute import map paths from root
 	rewritten := make(map[string]string)
 	for key, relPath := range downloaded {
-		absPath := filepath.Join(c.Unpm.Out, filepath.FromSlash(relPath))
-		fromRoot, err := filepath.Rel(c.Unpm.Root, absPath)
-		if err != nil {
-			return v.warnings, fmt.Errorf("computing relative path for %q: %w", key, err)
-		}
-		rewritten[key] = "/" + filepath.ToSlash(fromRoot)
+		rewritten[key] = path.Join(c.Unpm.Root, relPath)
 	}
 
 	if err := writeImportMap(c.Unpm.Out, rewritten, c.Unpm.Verbose); err != nil {
@@ -369,16 +364,16 @@ func readEntryPoints(c *cfg.Config) (map[string]string, error) {
 		return nil, fmt.Errorf("parsing importmap.json: %w", err)
 	}
 
-	// Convert absolute paths (e.g. "/vendor/esm.sh/...") to paths relative to outDir
+	// Convert absolute URL paths (e.g. "/vendor/esm.sh/...") to paths relative to outDir
+	// by stripping the root URL prefix
+	root := c.Unpm.Root
+	if !strings.HasSuffix(root, "/") {
+		root += "/"
+	}
 	result := make(map[string]string)
-	for key, absPath := range im.Imports {
-		// absPath is root-relative; resolve it against the config's root directory
-		full := filepath.Join(c.Unpm.Root, filepath.FromSlash(absPath))
-		rel, err := filepath.Rel(outDir, full)
-		if err != nil {
-			return nil, fmt.Errorf("computing relative path for %q: %w", key, err)
-		}
-		result[key] = filepath.ToSlash(rel)
+	for key, urlPath := range im.Imports {
+		rel := strings.TrimPrefix(urlPath, root)
+		result[key] = rel
 	}
 
 	return result, nil

@@ -59,9 +59,11 @@ func ReadConfig(configPath string) (*Config, error) {
 		cfg.Unpm.Out = filepath.Join(dir, cfg.Unpm.Out)
 	}
 	if cfg.Unpm.Root == "" {
-		cfg.Unpm.Root = dir
-	} else {
-		cfg.Unpm.Root = filepath.Join(dir, cfg.Unpm.Root)
+		rel, err := filepath.Rel(dir, cfg.Unpm.Out)
+		if err != nil {
+			rel = filepath.Base(cfg.Unpm.Out)
+		}
+		cfg.Unpm.Root = "/" + filepath.ToSlash(rel)
 	}
 
 	return &cfg, nil

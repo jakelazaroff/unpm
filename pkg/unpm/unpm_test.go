@@ -47,11 +47,10 @@ func TestVendor_SingleFile(t *testing.T) {
 	defer srv.Close()
 
 	outDir := filepath.Join(t.TempDir(), "vendor")
-	root := t.TempDir()
 
 	c := &cfg.Config{
 		Imports: map[string]string{"mylib": srv.URL + "/mylib.js"},
-		Unpm:    cfg.Options{Out: outDir, Root: root},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
 	}
 	if _, err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
@@ -104,7 +103,7 @@ func TestVendor_TransitiveDeps(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "vendor")
 	c := &cfg.Config{
 		Imports: map[string]string{"a": srv.URL + "/a.js"},
-		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
 	}
 	if _, err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
@@ -137,7 +136,7 @@ func TestVendor_OriginRelativeImport(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "vendor")
 	c := &cfg.Config{
 		Imports: map[string]string{"entry": srv.URL + "/entry.js"},
-		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
 	}
 	if _, err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
@@ -175,7 +174,7 @@ func TestVendor_ESMPath(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "vendor")
 	c := &cfg.Config{
 		Imports: map[string]string{"preact": srv.URL + "/preact"},
-		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
 	}
 	if _, err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
@@ -215,7 +214,7 @@ func TestVendor_TypeScriptTypes(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "vendor")
 	c := &cfg.Config{
 		Imports: map[string]string{"mylib": srv.URL + "/mylib.js"},
-		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
 	}
 	if _, err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
@@ -247,7 +246,7 @@ func TestVendor_SourceMap(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "vendor")
 	c := &cfg.Config{
 		Imports: map[string]string{"app": srv.URL + "/app.js"},
-		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
 	}
 	if _, err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
@@ -279,7 +278,7 @@ func TestVendor_DynamicImport(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "vendor")
 	c := &cfg.Config{
 		Imports: map[string]string{"entry": srv.URL + "/entry.js"},
-		Unpm:    cfg.Options{Out: outDir, Root: t.TempDir()},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
 	}
 	if _, err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
@@ -325,7 +324,7 @@ func TestVendor_Pin(t *testing.T) {
 				"a": srv.URL + "/a.js",
 				"b": srv.URL + "/b.js",
 			},
-			Unpm: cfg.Options{Out: outDir, Root: root, Pin: []string{host + "/b.js"}},
+			Unpm: cfg.Options{Out: outDir, Root: "/", Pin: []string{host + "/b.js"}},
 		}
 		if _, err := unpm.Vendor(c); err != nil {
 			t.Fatal(err)
@@ -364,7 +363,7 @@ func TestVendor_Pin(t *testing.T) {
 				"a": srv.URL + "/a.js",
 				"b": srv.URL + "/b.js",
 			},
-			Unpm: cfg.Options{Out: outDir, Root: root, Pin: []string{host + "/**"}},
+			Unpm: cfg.Options{Out: outDir, Root: "/", Pin: []string{host + "/**"}},
 		}
 		if _, err := unpm.Vendor(c); err != nil {
 			t.Fatal(err)
@@ -401,7 +400,7 @@ func TestCheck(t *testing.T) {
 	t.Run("passing", func(t *testing.T) {
 		c := &cfg.Config{
 			Imports: map[string]string{"a": "https://example.com/a.js"},
-			Unpm:    cfg.Options{Out: outDir, Root: outDir},
+			Unpm:    cfg.Options{Out: outDir, Root: "/"},
 		}
 		if err := unpm.Check(c); err != nil {
 			t.Fatalf("expected check to pass: %v", err)
@@ -415,7 +414,7 @@ func TestCheck(t *testing.T) {
 				"a":       "https://example.com/a.js",
 				"missing": "https://example.com/missing.js",
 			},
-			Unpm: cfg.Options{Out: outDir, Root: outDir},
+			Unpm: cfg.Options{Out: outDir, Root: "/"},
 		}
 		err := unpm.Check(c)
 		if err == nil {
@@ -432,7 +431,7 @@ func TestCheck(t *testing.T) {
 		os.WriteFile(filepath.Join(outDir, "importmap.json"), []byte(`{"imports":{"a":"/example.com/a.js"}}`), 0o644)
 		c := &cfg.Config{
 			Imports: map[string]string{"a": "https://example.com/a.js"},
-			Unpm:    cfg.Options{Out: outDir, Root: outDir},
+			Unpm:    cfg.Options{Out: outDir, Root: "/"},
 		}
 
 		// Capture stderr to check for spurious warnings
@@ -465,7 +464,7 @@ func TestCheck(t *testing.T) {
 		os.WriteFile(filepath.Join(outDir, "importmap.json"), []byte(`{"imports":{"c":"/example.com/c.js"}}`), 0o644)
 		c := &cfg.Config{
 			Imports: map[string]string{"c": "https://example.com/c.js"},
-			Unpm:    cfg.Options{Out: outDir, Root: outDir},
+			Unpm:    cfg.Options{Out: outDir, Root: "/"},
 		}
 		err := unpm.Check(c)
 		if err == nil {
@@ -492,7 +491,7 @@ func TestVendor_CleansOldFiles(t *testing.T) {
 
 	c := &cfg.Config{
 		Imports: map[string]string{"a": srv.URL + "/a.js"},
-		Unpm:    cfg.Options{Out: outDir, Root: root},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
 	}
 	if _, err := unpm.Vendor(c); err != nil {
 		t.Fatal(err)
@@ -524,7 +523,7 @@ func TestWhy(t *testing.T) {
 
 	c := &cfg.Config{
 		Imports: map[string]string{"entry": "https://example.com/entry.js"},
-		Unpm:    cfg.Options{Out: outDir, Root: outDir},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
 	}
 
 	// Should find the chain
