@@ -17,7 +17,7 @@ import (
 
 type Config struct {
 	Imports map[string]string `json:"imports"`
-	Unpm    Options           `json:"$unpm"`
+	Unpm    Options           `json:"unpm"`
 }
 
 type Options struct {

@@ -93,7 +93,7 @@ unpm's configuration file is called `unpm.json`. It's also a valid import map �
 
 While all `unpm.json` files are import maps, the converse is not true: `unpm.json` supports only a subset of the import map spec.
 
-`unpm.json` supports two top-level keys: `imports` and `$unpm`.
+`unpm.json` supports two top-level keys: `imports` and `unpm`.
 
 ### imports
 
@@ -110,15 +110,15 @@ While all `unpm.json` files are import maps, the converse is not true: `unpm.jso
 
 Unlike most package managers, unpm doesn't rely on an external package repository like npm or JSR. You can install packages from any URL on the Internet.
 
-### $unpm
+### unpm
 
-`$unpm` is a map that holds unpm-specific configuration. All of these are available as command line flags as well, but when running repeated commands it can be convenient to configure them from `unpm.json`.
+`unpm` is a map that holds unpm-specific configuration. All of these are available as command line flags as well, but when running repeated commands it can be convenient to configure them from `unpm.json`.
 
 - `out` specifies the directory to write any output files. Defaults to `./vendor`.
 - `root` specifies the path at which the output files are available on your website. Defaults to `/vendor`.
 - `pin` is a string array of glob patterns matching file paths relative to the output directory. Any matching files won't be removed or updated when running `unpm vendor`. Pinning is mostly useful when you've made local changes to a dependency that you don't want to be overwritten.
 
-To use `unpm.json` directly as an import map, remove the `$unpm` key — browser ignore unknown import map keys so it won't break anything, but there's no reason to keep it.
+To use `unpm.json` directly as an import map, remove the `unpm` key — browser ignore unknown import map keys so it won't break anything, but there's no reason to keep it.
 
 ## FAQ
 

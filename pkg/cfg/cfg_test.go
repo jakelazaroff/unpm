@@ -83,7 +83,7 @@ func TestReadConfig(t *testing.T) {
 	t.Run("custom out and root", func(t *testing.T) {
 		dir := t.TempDir()
 		p := filepath.Join(dir, "unpm.json")
-		os.WriteFile(p, []byte(`{"imports":{"foo":"https://example.com/foo.js"},"$unpm":{"out":"dist","root":"/assets/dist"}}`), 0o644)
+		os.WriteFile(p, []byte(`{"imports":{"foo":"https://example.com/foo.js"},"unpm":{"out":"dist","root":"/assets/dist"}}`), 0o644)
 
 		c, err := cfg.ReadConfig(p)
 		if err != nil {

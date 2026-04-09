@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,20 +28,17 @@ import (
 type vendorer struct {
 	config     *cfg.Config
 	outDir     string
-	downloaded map[string]string // full URL -> path relative to outDir
-	types      map[string]string // full URL -> types path relative to outDir (from x-typescript-types)
-	esmPaths   map[string]string // x-esm-path value -> path relative to outDir
+	downloaded map[string]string // full URL -> path
+	types      map[string]string // full URL -> types path (from x-typescript-types)
+	esmPaths   map[string]string // x-esm-path value -> path
 	verbose    bool
 	warnings   []string
 }
 
 func Vendor(c *cfg.Config) ([]string, error) {
 	// clean the output directory, preserving pinned files
-	out := c.Unpm.Out
-	if _, err := os.Stat(out); err == nil {
-		if _, err := clean(c, out); err != nil {
-			return []string{}, err
-		}
+	if _, err := clean(c, c.Unpm.Out); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return []string{}, err
 	}
 
 	v := &vendorer{
@@ -50,38 +48,33 @@ func Vendor(c *cfg.Config) ([]string, error) {
 		esmPaths:   make(map[string]string),
 	}
 
-	// Download all imports; relPath is relative to outDir
-	downloaded := make(map[string]string) // import key -> relPath within outDir
+	// download all imports
+	imports := make(map[string]string) // import key -> relative path within out directory
 	for key, rawURL := range c.Imports {
 		relPath, err := v.download(rawURL)
 		if err != nil {
 			return v.warnings, fmt.Errorf("downloading %q: %w", key, err)
 		}
-		downloaded[key] = relPath
+
+		imports[key] = path.Join(c.Unpm.Root, relPath)
 	}
 
-	// Compute absolute import map paths from root
-	rewritten := make(map[string]string)
-	for key, relPath := range downloaded {
-		rewritten[key] = path.Join(c.Unpm.Root, relPath)
-	}
-
-	if err := writeImportMap(c.Unpm.Out, rewritten, c.Unpm.Verbose); err != nil {
+	if err := writeImportMap(c.Unpm.Out, imports, c.Unpm.Verbose); err != nil {
 		return v.warnings, err
 	}
 
-	// Build types mapping: import key -> types path relative to outDir.
-	// Use x-typescript-types if available, otherwise fall back to the JS file itself.
-	typesMap := make(map[string]string)
+	// build types mapping: import key -> types path within out directory
+	// use x-typescript-types if available, otherwise fall back to the JS file itself
+	types := make(map[string]string)
 	for key, rawURL := range c.Imports {
 		if typesRel, ok := v.types[rawURL]; ok {
-			typesMap[key] = "./" + typesRel
+			types[key] = "./" + typesRel
 		} else {
-			typesMap[key] = "./" + downloaded[key]
+			types[key] = "./" + imports[key]
 		}
 	}
 
-	if err := writeTypesDts(c.Unpm.Out, typesMap, c.Unpm.Verbose); err != nil {
+	if err := writeTypesDts(c.Unpm.Out, types, c.Unpm.Verbose); err != nil {
 		return v.warnings, err
 	}
 
@@ -431,21 +424,19 @@ var importRe = regexp.MustCompile(`(\b(?:import|export)\s*(?:[^"']*\bfrom\s*|))(
 // sourceMappingRe matches //# sourceMappingURL=... comments.
 var sourceMappingRe = regexp.MustCompile(`(//[#@]\s*sourceMappingURL\s*=\s*)(\S+)`)
 
-func (v *vendorer) download(rawURL string) (string, error) {
-	// Bare paths like "/preact@10.19.3/..." are not supported at the top level;
-	// they are resolved to full URLs by rewriteImports before calling download.
-	fullURL := rawURL
-
-	// Already downloaded?
-	if rel, ok := v.downloaded[fullURL]; ok {
-		return rel, nil
+func (v *vendorer) download(fullURL string) (string, error) {
+	// if already downloaded, no need to continue
+	if relativePath, ok := v.downloaded[fullURL]; ok {
+		return relativePath, nil
 	}
 
+	// fetch the url
 	u, err := url.Parse(fullURL)
 	if err != nil {
 		return "", fmt.Errorf("parsing URL %s: %w", fullURL, err)
 	}
 
+	// download the file
 	resp, err := http.Get(fullURL)
 	if err != nil {
 		return "", fmt.Errorf("fetching %s: %w", fullURL, err)
@@ -456,25 +447,28 @@ func (v *vendorer) download(rawURL string) (string, error) {
 		return "", fmt.Errorf("fetching %s: status %d", fullURL, resp.StatusCode)
 	}
 
-	// esm.sh returns x-esm-path with the canonical resolved path. Skip the
-	// shim and download the resolved module directly.
+	// esm.sh returns x-esm-path with the canonical resolved path;
+	// skip the shim and download the resolved module directly
 	if esmPath := resp.Header.Get("x-esm-path"); esmPath != "" {
-		if rel, ok := v.esmPaths[esmPath]; ok {
-			v.downloaded[fullURL] = rel
-			return rel, nil
+		if resolved, ok := v.esmPaths[esmPath]; ok {
+			v.downloaded[fullURL] = resolved
+			return resolved, nil
 		}
+
+		// construct canonical URL
 		canonicalURL := u.Scheme + "://" + u.Host + esmPath
 		rel, err := v.download(canonicalURL)
 		if err != nil {
 			return "", fmt.Errorf("downloading canonical path for %s: %w", fullURL, err)
 		}
+
 		v.downloaded[fullURL] = rel
 		v.esmPaths[esmPath] = rel
 		return rel, nil
 	}
 
-	// Derive local directory from the original URL's host + path.
-	// If the URL path has a recognized file extension, the filename is the basename;
+	// derive local file path from the original URL's host + path.
+	// if the URL path has a recognized file extension, the filename is the basename;
 	// otherwise, treat the whole path as a directory and derive the filename from the response.
 	var localDir, filename string
 	ext := strings.ToLower(path.Ext(u.Path))
@@ -484,11 +478,13 @@ func (v *vendorer) download(rawURL string) (string, error) {
 		filename = path.Base(u.Path)
 	default:
 		localDir = path.Join(u.Host, u.Path)
-		// Use the final (post-redirect) URL to determine filename
+
+		// use the final (post-redirect) URL to determine filename
 		filename = path.Base(resp.Request.URL.Path)
 		if filename == "" || filename == "/" || filename == "." {
 			filename = "index.js"
 		}
+
 		fext := strings.ToLower(path.Ext(filename))
 		switch fext {
 		case ".js", ".mjs", ".mts", ".ts", ".css", ".json", ".wasm", ".map":
@@ -498,6 +494,7 @@ func (v *vendorer) download(rawURL string) (string, error) {
 		}
 	}
 
+	// create the directory
 	dir := filepath.Join(v.config.Unpm.Out, filepath.FromSlash(localDir))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("creating directory %s: %w", dir, err)
@@ -507,7 +504,7 @@ func (v *vendorer) download(rawURL string) (string, error) {
 	rel, _ := filepath.Rel(v.config.Unpm.Out, destPath)
 	rel = filepath.ToSlash(rel)
 
-	// Register before recursing to prevent cycles
+	// register before recursing to prevent cycles
 	v.downloaded[fullURL] = rel
 
 	body, err := io.ReadAll(resp.Body)
@@ -515,7 +512,7 @@ func (v *vendorer) download(rawURL string) (string, error) {
 		return "", fmt.Errorf("reading %s: %w", fullURL, err)
 	}
 
-	// If the file is pinned, skip writing (preserve local modifications).
+	// if the file is pinned, skip writing to preserve local modifications
 	if v.config.IsPinned(rel) {
 		if v.config.Unpm.Verbose {
 			fmt.Printf("%s -> %s (pinned)\n", fullURL, rel)
@@ -526,7 +523,7 @@ func (v *vendorer) download(rawURL string) (string, error) {
 		// Only rewrite imports and source maps in code files, not in .map files
 		if strings.ToLower(path.Ext(u.Path)) != ".map" {
 			// Find and recursively download origin-relative and relative imports, rewriting paths
-			content, err = v.rewriteImports(content, rel, fullURL)
+			content, err = v.rewriteImports(u, content, rel)
 			if err != nil {
 				return "", fmt.Errorf("rewriting imports in %s: %w", fullURL, err)
 			}
@@ -559,9 +556,8 @@ func (v *vendorer) download(rawURL string) (string, error) {
 	return rel, nil
 }
 
-func (v *vendorer) rewriteImports(content, currentFileRel, currentURL string) (string, error) {
+func (v *vendorer) rewriteImports(u *url.URL, content, currentFileRel string) (string, error) {
 	currentDir := path.Dir(currentFileRel)
-	u, _ := url.Parse(currentURL)
 	origin := u.Scheme + "://" + u.Host
 	var rewriteErr error
 
@@ -572,7 +568,7 @@ func (v *vendorer) rewriteImports(content, currentFileRel, currentURL string) (s
 
 		groups := importRe.FindStringSubmatch(match)
 
-		// Determine prefix, quote, and path from either static (groups 1-4) or dynamic (groups 5-8) branch
+		// determine prefix, quote, and path from either static (groups 1-4) or dynamic (groups 5-8) branch
 		var prefix, quote, impPath, suffix string
 		if groups[1] != "" {
 			prefix = groups[1]
