@@ -4,7 +4,7 @@ A simpler package manager for no-build websites.
 
 ## Why another package manager?
 
-Modern package managers are complicated. They use a complicated algorithm to make sure shared transitive dependency versions work out, maybe do some fancy filesystem stuff to save disk space. Because they let you specify version ranges, installation is non-deterministic — so they write out a special lock file just to reliably install the same dependencies. And of course, without another tool to bundle everything up, you can't even use the installed files in a browser.
+Modern package managers are complicated. They use a complex algorithm to make sure shared transitive dependency versions work out, maybe do some fancy filesystem stuff to save disk space. Because they let you specify version ranges, installation is non-deterministic — so they write out a special lock file just to reliably install the same dependencies. And of course, without another tool to bundle everything up, you can't even use the installed files in a browser.
 
 unpm takes a different approach.
 Rather than a bespoke configuration format, it uses [import maps](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script/type/importmap): a new browser feature that lets you customize module specifiers.
@@ -67,7 +67,7 @@ If you're using TypeScript to check your code, you'll need to tell it where to f
 
 ## CLI
 
-Note that there are no commands for adding or removing packages; instead, you should edit `unpm.json` directly.
+The unpm command line interface is small: just three commands. Note that there are no commands for adding, removing or updating packages; instead, you should edit `unpm.json` directly and then run `unpm vendor`.
 
 ### vendor
 
@@ -91,7 +91,7 @@ Given a vendored file on disk, `unpm why` shows all paths from an `unpm.json` im
 
 unpm's configuration file is called `unpm.json`. It's also a valid import map — a guiding principle of unpm is that if you decide to stop using it, you should be able to simply use the contents of `unpm.json` itself as your import map proper, and your website will continue to work unaffected.
 
-While all `unpm.json` files are import maps, the converse is not true: `unpm.json` supports only a subset of the import map spec.
+Note that while all `unpm.json` files are import maps, the converse is not true: `unpm.json` supports only a subset of the import map spec.
 
 `unpm.json` supports two top-level keys: `imports` and `unpm`.
 
@@ -112,13 +112,13 @@ Unlike most package managers, unpm doesn't rely on an external package repositor
 
 ### unpm
 
-`unpm` is a map that holds unpm-specific configuration. All of these are available as command line flags as well, but when running repeated commands it can be convenient to configure them from `unpm.json`.
+`unpm` is a map that holds unpm-specific configuration. All options are available as command line flags as well, but when repeatedly running commands it can be convenient to configure them from `unpm.json`.
 
 - `out` specifies the directory to write any output files. Defaults to `./vendor`.
 - `root` specifies the path at which the output files are available on your website. Defaults to `/vendor`.
 - `pin` is a string array of glob patterns matching file paths relative to the output directory. Any matching files won't be removed or updated when running `unpm vendor`. Pinning is mostly useful when you've made local changes to a dependency that you don't want to be overwritten.
 
-To use `unpm.json` directly as an import map, remove the `unpm` key — browser ignore unknown import map keys so it won't break anything, but there's no reason to keep it.
+To use `unpm.json` directly as an import map, remove the `unpm` key (browser ignore unknown import map keys so it won't break anything, but there's no reason to keep it) and paste the rest into a `<script type="importmap">` in your HTML.
 
 ## FAQ
 
