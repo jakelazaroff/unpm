@@ -27,11 +27,9 @@ import (
 
 type vendorer struct {
 	config     *cfg.Config
-	outDir     string
 	downloaded map[string]string // full URL -> path
 	types      map[string]string // full URL -> types path (from x-typescript-types)
 	esmPaths   map[string]string // x-esm-path value -> path
-	verbose    bool
 	warnings   []string
 }
 
@@ -78,7 +76,9 @@ func Vendor(c *cfg.Config) ([]string, error) {
 		return v.warnings, err
 	}
 
-	checkBareImports(c.Unpm.Out, c.Imports)
+	for spec, files := range findBareImports(c.Unpm.Out, c.Imports) {
+		fmt.Printf("\033[33mwarning:\033[0m %q is imported by %s but missing from import map\n", spec, strings.Join(files, ", "))
+	}
 
 	return v.warnings, nil
 }
@@ -126,36 +126,7 @@ func Check(c *cfg.Config) error {
 	var errors []string
 
 	// 1. Error: bare module specifiers in vendored files not in the import map.
-	missing := map[string][]string{}
-	filepath.Walk(c.Unpm.Out, func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(p))
-		if ext != ".js" && ext != ".mjs" {
-			return nil
-		}
-		data, err := os.ReadFile(p)
-		if err != nil {
-			return nil
-		}
-		relPath, _ := filepath.Rel(c.Unpm.Out, p)
-		relPath = filepath.ToSlash(relPath)
-		for _, m := range allImportRe.FindAllStringSubmatch(string(data), -1) {
-			spec := m[1]
-			if spec == "" {
-				spec = m[2]
-			}
-			if strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") || strings.Contains(spec, "://") {
-				continue
-			}
-			if _, ok := c.Imports[spec]; !ok {
-				missing[spec] = append(missing[spec], relPath)
-			}
-		}
-		return nil
-	})
-	for spec, files := range missing {
+	for spec, files := range findBareImports(c.Unpm.Out, c.Imports) {
 		errors = append(errors, fmt.Sprintf("%q is imported by %s but missing from import map", spec, strings.Join(files, ", ")))
 	}
 
@@ -217,10 +188,10 @@ func Check(c *cfg.Config) error {
 	return nil
 }
 
-// checkBareImports walks all vendored files and warns about bare import
-// specifiers (e.g. "preact/hooks") that are not present in the import map.
-func checkBareImports(outDir string, imports map[string]string) {
-	missing := map[string][]string{} // bare specifier -> list of files that use it
+// findBareImports walks all vendored JS files and returns bare import specifiers
+// (e.g. "preact/hooks") that are not present in the import map.
+func findBareImports(outDir string, imports map[string]string) map[string][]string {
+	missing := map[string][]string{}
 
 	filepath.Walk(outDir, func(p string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
@@ -255,13 +226,7 @@ func checkBareImports(outDir string, imports map[string]string) {
 		return nil
 	})
 
-	if len(missing) == 0 {
-		return
-	}
-
-	for spec, files := range missing {
-		fmt.Printf("\033[33mwarning:\033[0m %q is imported by %s but missing from import map\n", spec, strings.Join(files, ", "))
-	}
+	return missing
 }
 
 func Why(c *cfg.Config, target string) error {
@@ -529,7 +494,7 @@ func (v *vendorer) download(fullURL string) (string, error) {
 			}
 
 			// Download source maps referenced by //# sourceMappingURL=...
-			content = v.rewriteSourceMap(content, rel, fullURL)
+			content = v.rewriteSourceMap(u, content, rel)
 		}
 
 		if err := os.WriteFile(destPath, []byte(content), 0o644); err != nil {
@@ -610,9 +575,8 @@ func (v *vendorer) rewriteImports(u *url.URL, content, currentFileRel string) (s
 	return result, rewriteErr
 }
 
-func (v *vendorer) rewriteSourceMap(content, currentFileRel, currentURL string) string {
+func (v *vendorer) rewriteSourceMap(u *url.URL, content, currentFileRel string) string {
 	currentDir := path.Dir(currentFileRel)
-	u, _ := url.Parse(currentURL)
 	origin := u.Scheme + "://" + u.Host
 
 	return sourceMappingRe.ReplaceAllStringFunc(content, func(match string) string {
