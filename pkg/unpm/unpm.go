@@ -68,7 +68,7 @@ func Vendor(c *cfg.Config) ([]string, error) {
 		if typesRel, ok := v.types[rawURL]; ok {
 			types[key] = "./" + typesRel
 		} else {
-			types[key] = "./" + imports[key]
+			types[key] = "./" + v.downloaded[rawURL]
 		}
 	}
 

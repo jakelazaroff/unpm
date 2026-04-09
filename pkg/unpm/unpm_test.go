@@ -228,11 +228,51 @@ func TestVendor_TypeScriptTypes(t *testing.T) {
 		t.Fatalf(".d.ts file not downloaded: %v", err)
 	}
 
-	// jsconfig.json should map to the .d.ts file
+	// jsconfig.json should map to the .d.ts file with a clean relative path
 	data, _ := os.ReadFile(filepath.Join(outDir, "jsconfig.json"))
 	content := string(data)
 	if !strings.Contains(content, "mylib.d.ts") {
 		t.Fatalf("jsconfig.json should reference .d.ts file, got: %s", content)
+	}
+	if strings.Contains(content, ".//") {
+		t.Fatalf("jsconfig.json has malformed path with double slash, got: %s", content)
+	}
+}
+
+func TestVendor_TypesFallbackPath(t *testing.T) {
+	// When there's no x-typescript-types header, jsconfig.json should use a
+	// path relative to the output directory, not the root-prefixed import path.
+	srv := newTestServer(map[string]testFile{
+		"/mylib.js": {body: `export function hello() {}`},
+	})
+	defer srv.Close()
+
+	outDir := filepath.Join(t.TempDir(), "vendor")
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	c := &cfg.Config{
+		Imports: map[string]string{"mylib": srv.URL + "/mylib.js"},
+		Unpm:    cfg.Options{Out: outDir, Root: "/assets/vendor"},
+	}
+	if _, err := unpm.Vendor(c); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "jsconfig.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Should be a relative path like ./127.0.0.1:PORT/mylib.js
+	expected := "./" + host + "/mylib.js"
+	if !strings.Contains(content, expected) {
+		t.Fatalf("jsconfig.json should contain %q, got: %s", expected, content)
+	}
+
+	// Must not contain the root prefix
+	if strings.Contains(content, "/assets/vendor") {
+		t.Fatalf("jsconfig.json should not contain root prefix, got: %s", content)
 	}
 }
 
