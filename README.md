@@ -2,14 +2,19 @@
 
 A simpler package manager for no-build websites.
 
-## Why another package manager?
+## _Another_ package manager?
 
-Modern package managers are complicated. They use a complex algorithm to make sure shared transitive dependency versions work out, maybe do some fancy filesystem stuff to save disk space. Because they let you specify version ranges, installation is non-deterministic — so they write out a special lock file just to reliably install the same dependencies. And of course, without another tool to bundle everything up, you can't even use the installed files in a browser.
+For a lot of websites, using npm to manage dependencies is like picking up your groceries in a semi truck.
 
-unpm takes a different approach.
-Rather than a bespoke configuration format, it uses [import maps](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script/type/importmap): a new browser feature that lets you customize module specifiers.
-Rather than downloading packages only from special repositories, you download them from any website.
-Rather than using a lockfile and forcing you to install your dependencies over and over, you just commit them to your repo.
+Why? Modern package managers are complicated. They use a complex algorithm to make sure shared transitive dependency versions work out, maybe do some fancy filesystem stuff to save disk space. Installation is non-deterministic, so they write out a special lock file just to reliably install the same dependencies. And of course, without another tool to bundle everything up, you can't even use the installed files in a browser.
+
+**unpm is different**: a package manager built on modern web technologies, specifically for websites with no build step.
+
+- Rather than a bespoke configuration format, you use an [import map](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script/type/importmap): a new browser feature that lets you customize module names.
+- Rather than downloading packages only from special repositories, unpm can download dependencies from any website.
+- Rather than using a special command to modify your dependencies, unpm lets you just edit the files.
+- Rather than requiring you to use a compiler and bundler, unpm downloads files that you can serve directly with no build step.
+- Rather forcing you to install your dependencies over and over, unpm is designed for you to just commit them to your repo.
 
 ## Getting started
 
@@ -18,12 +23,14 @@ After installing unpm, create an `unpm.json` file at the root of your project:
 ```json
 {
   "imports": {
-    "preact": "https://esm.sh/preact@10.19.3"
+    "preact": "https://esm.sh/preact@10.19.3",
   }
 }
 ```
 
 Your first reaction might be "that looks like an import map". And you'd be right: `unpm.json` files are also valid import maps!
+
+Unlike other package managers, unpm lets you install packages from any website. We recommend [esm.sh](https://esm.sh), but any website will work — [cdnjs](https://cdnjs.com), GitHub raw links, even your own personal website!
 
 Once you've filled out `unpm.json` with all your dependencies, run `unpm vendor` to download them locally:
 
@@ -57,7 +64,11 @@ Two important notes:
 
 That's it! Your dependencies will now work unbundled in a browser.
 
-If you're using TypeScript to check your code, you'll need to tell it where to find any vendored type definitions. You can do that by having your `jsconfig.json` extend the one that unpm generates:
+## Types
+
+unpm can also download TypeScript type definitions from supporting websites. If a response includes the header `x-typescript-types`, unpm will download its type definitions.
+
+You'll need to tell TypeScript where to find any vendored type definitions. You can do that by having your `jsconfig.json` extend the one that unpm generates:
 
 ```json
 {
@@ -93,20 +104,23 @@ unpm's configuration file is called `unpm.json`. It's also a valid import map �
 
 Note that while all `unpm.json` files are import maps, the converse is not true: `unpm.json` supports only a subset of the import map spec.
 
-`unpm.json` supports two top-level keys: `imports` and `unpm`.
-
-### imports
-
-`imports` is a [module specifier map](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script/type/importmap#module_specifier_map) that maps between module specifiers and URLs. It's a bit stricter than actual import maps: you can only use ["bare modules"](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script/type/importmap#bare_modules), meaning each property must resolve to a JavaScript file rather than a directory. In addition, each value must be a full URL.
+`unpm.json` supports two top-level keys: `imports` and `unpm`. Here's an example `unpm.json` file:
 
 ```json
 {
   "imports": {
     "preact": "https://esm.sh/preact@10.19.3",
     "validate": "https://raw.githubusercontent.com/jakelazaroff/validate.js/refs/heads/main/validate.js"
+  },
+  "unpm": {
+    "out": "./src/vendor"
   }
 }
 ```
+
+### imports
+
+`imports` is a [module specifier map](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script/type/importmap#module_specifier_map) that maps between module specifiers and URLs. It's a bit stricter than actual import maps: you can only use ["bare modules"](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script/type/importmap#bare_modules), meaning each property must resolve to a JavaScript file rather than a directory. In addition, each value must be a full URL.
 
 Unlike most package managers, unpm doesn't rely on an external package repository like npm or JSR. You can install packages from any URL on the Internet.
 
@@ -118,29 +132,11 @@ Unlike most package managers, unpm doesn't rely on an external package repositor
 - `root` specifies the path at which the output files are available on your website. Defaults to `/vendor`.
 - `pin` is a string array of glob patterns matching file paths relative to the output directory. Any matching files won't be removed or updated when running `unpm vendor`. Pinning is mostly useful when you've made local changes to a dependency that you don't want to be overwritten.
 
-To use `unpm.json` directly as an import map, remove the `unpm` key (browser ignore unknown import map keys so it won't break anything, but there's no reason to keep it) and paste the rest into a `<script type="importmap">` in your HTML.
+To use `unpm.json` directly as an import map, remove the `unpm` key (browsers ignore unknown import map keys so it won't break anything, but there's no reason to keep it) and paste the rest into a `<script type="importmap">` in your HTML.
 
 ## FAQ
 
 These aren't actually frequently asked; just socratic explanations:
-
-### Isn't it bad to commit dependencies to my repo?
-
-Nope! There are two main reasons most package managers advise you not to commit dependencies:
-
-- The folder can be really big.
-- Dependencies with native binaries will only work on a single platform.
-
-The solution to the first is to download less code (and, ideally, use fewer dependencies in the first place). The second isn't an issue for websites because code that runs in browsers is not platform specific.
-
-Most package managers add a ton of overhead just to get back what vendoring gives you for free:
-
-- Since your dependencies are not committed to source control, you depend on an external system to build and run your app.
-- Since installation across version ranges is non-deterministic, they need a lock file to make sure the exact same dependencies get installed.
-- Since you can't just edit a dependency file, they need [baroque workarounds](https://pnpm.io/cli/patch) to let you patch a dependency.
-- Since you can't use the installed files in your browser, you need _another_ tool to bundle everything together.
-
-If you're still unconvinced, htmx has [a great essay on vendoring dependencies](https://htmx.org/essays/vendoring/).
 
 ### Don't real web applications need a build step?
 
@@ -156,3 +152,21 @@ In practice, though, there are a bunch of problems unpm solves beyond just downl
 - If a library is written in TypeScript, you'd need to find a transpiled version.
 - If you're checking types, you'd need to find the type definitions and configure TypeScript.
 - If a transitive dependency is missing from your import map, you won't know until you actually load your website.
+
+### Isn't it bad to commit dependencies to my repo?
+
+There are two main reasons most package managers advise you not to commit dependencies:
+
+- Dependencies with native binaries will only work on a single platform.
+- The folder can be really big — hundreds or even thousands of megabytes of code.
+
+That's it! It's true that both of these are fixed by not committing dependencies to your repository. But it introduces a ton of drawbacks:
+
+- Since your dependencies are not committed to source control, you depend on an external system to build and run your app.
+- Since installation across version ranges is non-deterministic, they need a lock file to make sure the exact same dependencies get installed.
+- Since you can't just edit a dependency file, they need [baroque workarounds](https://pnpm.io/cli/patch) to let you patch a dependency.
+- Since you can't use the installed files in your browser, you need _another_ tool to bundle everything together.
+
+For some apps, this might be unavoidable. But for many websites, these are tradeoffs that don't need to be made. For example, native binaries aren't an issue for websites, because code that runs in browsers is not platform specific. And the solution to a bloated dependencies folder is to download less code (and, ideally, use fewer dependencies in the first place).
+
+If you're still unconvinced, htmx has [a great essay on vendoring dependencies](https://htmx.org/essays/vendoring/).
