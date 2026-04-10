@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jakelazaroff/unpm/pkg/cfg"
-	"github.com/jakelazaroff/unpm/pkg/unpm"
+	"github.com/jakelazaroff/unpm/internal/cfg"
+	"github.com/jakelazaroff/unpm/internal/unpm"
 )
 
 // stringSlice implements flag.Value so a flag can be repeated.

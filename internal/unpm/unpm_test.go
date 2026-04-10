@@ -15,8 +15,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jakelazaroff/unpm/pkg/cfg"
-	"github.com/jakelazaroff/unpm/pkg/unpm"
+	"github.com/jakelazaroff/unpm/internal/cfg"
+	"github.com/jakelazaroff/unpm/internal/unpm"
 )
 
 // testFile defines a file served by the test server.

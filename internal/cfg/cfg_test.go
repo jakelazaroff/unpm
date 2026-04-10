@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jakelazaroff/unpm/pkg/cfg"
+	"github.com/jakelazaroff/unpm/internal/cfg"
 )
 
 func TestReadConfig(t *testing.T) {

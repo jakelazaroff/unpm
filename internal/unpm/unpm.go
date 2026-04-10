@@ -22,7 +22,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/jakelazaroff/unpm/pkg/cfg"
+	"github.com/jakelazaroff/unpm/internal/cfg"
 )
 
 type vendorer struct {
