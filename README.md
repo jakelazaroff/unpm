@@ -6,11 +6,11 @@ A simpler package manager for no-build websites.
 
 For a lot of websites, using npm to manage dependencies is like picking up your groceries in a semi truck.
 
-Why? Modern package managers are complicated. They use a complex algorithm to make sure shared transitive dependency versions work out, maybe do some fancy filesystem stuff to save disk space. Installation is non-deterministic, so they write out a special lock file just to reliably install the same dependencies. And of course, without another tool to bundle everything up, you can't even use the installed files in a browser.
+Why? Modern package managers are complicated. They use a complex algorithm to make sure shared transitive dependency versions work out, maybe do some fancy filesystem stuff to save disk space. Installation is non-deterministic, so they write out a special lock file just to reliably install the same dependencies every time. And of course, without another tool to bundle everything up, none of this will even with work in a browser.
 
 **unpm is different**: a package manager built on modern web technologies, specifically for websites with no build step.
 
-- Rather than a bespoke configuration format, you use an [import map](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script/type/importmap): a new browser feature that lets you customize module names.
+- Rather than a bespoke configuration format, you use a standard import map.
 - Rather than downloading packages only from special repositories, unpm can download dependencies from any website.
 - Rather than using a special command to modify your dependencies, unpm lets you just edit the files.
 - Rather than requiring you to use a compiler and bundler, unpm downloads files that you can serve directly with no build step.
@@ -27,8 +27,6 @@ After installing unpm, create an `unpm.json` file at the root of your project:
   }
 }
 ```
-
-Your first reaction might be "that looks like an import map". And you'd be right: `unpm.json` files are also valid import maps!
 
 Unlike other package managers, unpm lets you install packages from any website. We recommend [esm.sh](https://esm.sh), but any website will work — [cdnjs](https://cdnjs.com), GitHub raw links, even your own personal website!
 
@@ -64,7 +62,7 @@ Two important notes:
 
 That's it! Your dependencies will now work unbundled in a browser.
 
-## Types
+## Type checking
 
 unpm can also download TypeScript type definitions from supporting websites. If a response includes the header `x-typescript-types`, unpm will download its type definitions.
 
@@ -75,6 +73,24 @@ You'll need to tell TypeScript where to find any vendored type definitions. You 
   "extends": ["./vendor/jsconfig.json"]
 }
 ```
+
+## How does it work?
+
+Let's look at `unpm.json` again:
+
+```json
+{
+  "imports": {
+    "preact": "https://esm.sh/preact@10.19.3",
+  }
+}
+```
+
+That's an [import map](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script/type/importmap): a HTML feature that lets you define what happens when you run `import { Component } from "preact";`.
+
+Normally, you'd put that in a `<script type="importmap">` tag. When the page loads, the browser does the hard work of mapping module specifiers to URLs, downloading dependencies, following transitive imports and the like.
+
+unpm does that same thing for you in development. When you run `unpm vendor`, it downloads everything to your local disk. Then it writes an `importmap.js` file — a small shim that injects a modified import map pointing to your local files rather than remote ones.
 
 ## CLI
 
@@ -149,7 +165,8 @@ You might not! You could hotlink to CDNs like esm.sh, or download the files your
 In practice, though, there are a bunch of problems unpm solves beyond just downloading the files for you:
 
 - If a library has multiple files, you'd need to vendor all of them and preserve the directory structure.
-- If a library is written in TypeScript, you'd need to find a transpiled version.
+- If any of those files import URLs rather than paths, you'd need to manually change them to point to your disk.
+- If the code is written in TypeScript, you'd need to find a transpiled version.
 - If you're checking types, you'd need to find the type definitions and configure TypeScript.
 - If a transitive dependency is missing from your import map, you won't know until you actually load your website.
 
