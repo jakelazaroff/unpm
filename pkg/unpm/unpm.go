@@ -429,6 +429,20 @@ func (v *vendorer) download(fullURL string) (string, error) {
 
 		v.downloaded[fullURL] = rel
 		v.esmPaths[esmPath] = rel
+
+		// Check for type definitions before returning —
+		// the x-typescript-types header is on this response, not the canonical one
+		if typesURL := resp.Header.Get("x-typescript-types"); typesURL != "" {
+			if strings.HasPrefix(typesURL, "/") {
+				typesURL = u.Scheme + "://" + u.Host + typesURL
+			}
+			if typesRel, err := v.download(typesURL); err != nil {
+				v.warnings = append(v.warnings, fmt.Sprintf("failed to download types for %s: %v", fullURL, err))
+			} else {
+				v.types[fullURL] = typesRel
+			}
+		}
+
 		return rel, nil
 	}
 

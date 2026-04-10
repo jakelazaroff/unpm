@@ -239,6 +239,48 @@ func TestVendor_TypeScriptTypes(t *testing.T) {
 	}
 }
 
+func TestVendor_TypeScriptTypesWithEsmPath(t *testing.T) {
+	// When esm.sh returns both x-esm-path and x-typescript-types on the shim
+	// response, the types should still be downloaded even though the shim
+	// redirects to the canonical path.
+	srv := newTestServer(map[string]testFile{
+		"/preact@10": {
+			body: `export * from "/preact@10/es2022/preact.mjs";`,
+			headers: map[string]string{
+				"X-Esm-Path":         "/preact@10/es2022/preact.mjs",
+				"X-Typescript-Types": "/preact@10/src/index.d.ts",
+			},
+		},
+		"/preact@10/es2022/preact.mjs": {body: `export function h() {}`},
+		"/preact@10/src/index.d.ts":    {body: `export declare function h(): any;`},
+	})
+	defer srv.Close()
+
+	outDir := filepath.Join(t.TempDir(), "vendor")
+	c := &cfg.Config{
+		Imports: map[string]string{"preact": srv.URL + "/preact@10"},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
+	}
+	if _, err := unpm.Vendor(c); err != nil {
+		t.Fatal(err)
+	}
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	// .d.ts file should be downloaded
+	dtsPath := filepath.Join(outDir, host, "preact@10", "src", "index.d.ts")
+	if _, err := os.Stat(dtsPath); err != nil {
+		t.Fatalf(".d.ts file not downloaded: %v", err)
+	}
+
+	// jsconfig.json should map to the .d.ts file, not the .mjs file
+	data, _ := os.ReadFile(filepath.Join(outDir, "jsconfig.json"))
+	content := string(data)
+	if !strings.Contains(content, "index.d.ts") {
+		t.Fatalf("jsconfig.json should reference .d.ts file, got: %s", content)
+	}
+}
+
 func TestVendor_TypesFallbackPath(t *testing.T) {
 	// When there's no x-typescript-types header, jsconfig.json should use a
 	// path relative to the output directory, not the root-prefixed import path.
