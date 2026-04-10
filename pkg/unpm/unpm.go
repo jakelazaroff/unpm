@@ -686,6 +686,7 @@ func writeTypesDts(dir string, types map[string]string, verbose bool) error {
 		"compilerOptions": map[string]any{
 			"paths": paths,
 		},
+		"exclude": []string{"."},
 	}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling jsconfig.json: %w", err)
