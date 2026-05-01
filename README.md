@@ -12,7 +12,7 @@ Why? Modern package managers are complicated. They use a complex algorithm to ma
 
 - Rather than a bespoke configuration format, you use a standard import map.
 - Rather than downloading packages only from special repositories, unpm can download dependencies from any website.
-- Rather than using a special command to modify your dependencies, unpm lets you just edit the files.
+- Rather than using a special command to patch your dependencies, unpm lets you just edit the files.
 - Rather than requiring you to use a compiler and bundler, unpm downloads files that you can serve directly with no build step.
 - Rather forcing you to install your dependencies over and over, unpm is designed for you to just commit them to your repo.
 
