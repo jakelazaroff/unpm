@@ -161,6 +161,52 @@ func TestVendor_OriginRelativeImport(t *testing.T) {
 	}
 }
 
+func TestVendor_AbsoluteURLImport(t *testing.T) {
+	// .d.ts files from esm.sh sometimes contain imports with full https:// URLs.
+	// Those imports must be vendored and rewritten to relative paths, otherwise
+	// the type definitions can't be resolved offline.
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/lib.d.ts":
+			w.Write([]byte(`import { dep } from "` + srvURL + `/dep.d.ts";` + "\nexport declare const x: typeof dep;\n"))
+		case "/dep.d.ts":
+			w.Write([]byte(`export declare const dep: number;`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	srvURL = srv.URL
+	defer srv.Close()
+
+	outDir := filepath.Join(t.TempDir(), "vendor")
+	c := &cfg.Config{
+		Imports: map[string]string{"lib": srv.URL + "/lib.d.ts"},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
+	}
+	if _, err := unpm.Vendor(c); err != nil {
+		t.Fatal(err)
+	}
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	// dep.d.ts should have been downloaded
+	depPath := filepath.Join(outDir, host, "dep.d.ts")
+	if _, err := os.Stat(depPath); err != nil {
+		t.Fatalf("dep.d.ts not downloaded: %v", err)
+	}
+
+	// lib.d.ts should have its absolute URL rewritten to a relative path
+	data, _ := os.ReadFile(filepath.Join(outDir, host, "lib.d.ts"))
+	content := string(data)
+	if strings.Contains(content, "://") {
+		t.Fatalf("absolute URL import was not rewritten: %s", content)
+	}
+	if !strings.Contains(content, `"./dep.d.ts"`) {
+		t.Fatalf("expected rewritten import to ./dep.d.ts, got: %s", content)
+	}
+}
+
 func TestVendor_ESMPath(t *testing.T) {
 	srv := newTestServer(map[string]testFile{
 		"/preact": {

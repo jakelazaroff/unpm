@@ -384,7 +384,7 @@ func walkImports(outDir, relPath string, reachable map[string]bool) error {
 // importRe matches import/export statements and dynamic import() calls with origin-relative or relative path specifiers.
 // For static imports: captures the statement prefix (group 1), quote char (group 2), path (group 3), closing quote (group 4).
 // For dynamic imports: captures "import(" prefix (group 5), quote char (group 6), path (group 7), closing quote + ")" (group 8).
-var importRe = regexp.MustCompile(`(\b(?:import|export)\s*(?:[^"']*\bfrom\s*|))(["'])((?:/|\.\.?/)[^"']+)(["'])|(\bimport\s*\(\s*)(["'])((?:/|\.\.?/)[^"']+)(["']\s*\))`)
+var importRe = regexp.MustCompile(`(\b(?:import|export)\s*(?:[^"']*\bfrom\s*|))(["'])((?:[a-zA-Z]+://|/|\.\.?/)[^"']+)(["'])|(\bimport\s*\(\s*)(["'])((?:[a-zA-Z]+://|/|\.\.?/)[^"']+)(["']\s*\))`)
 
 // sourceMappingRe matches //# sourceMappingURL=... comments.
 var sourceMappingRe = regexp.MustCompile(`(//[#@]\s*sourceMappingURL\s*=\s*)(\S+)`)
@@ -562,11 +562,12 @@ func (v *vendorer) rewriteImports(u *url.URL, content, currentFileRel string) (s
 		}
 
 		var depURL string
-		if strings.HasPrefix(impPath, "/") {
-			// Origin-relative path
+		switch {
+		case strings.Contains(impPath, "://"):
+			depURL = impPath
+		case strings.HasPrefix(impPath, "/"):
 			depURL = origin + impPath
-		} else {
-			// Relative path — resolve against the current file's URL
+		default:
 			depURL = origin + path.Join(path.Dir(u.Path), impPath)
 		}
 
