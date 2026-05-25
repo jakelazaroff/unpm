@@ -22,15 +22,36 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/evanw/esbuild/pkg/api"
+
 	"github.com/jakelazaroff/unpm/internal/cfg"
 )
 
 type vendorer struct {
-	config     *cfg.Config
-	downloaded map[string]string // full URL -> path
-	types      map[string]string // full URL -> types path (from x-typescript-types)
-	esmPaths   map[string]string // x-esm-path value -> path
-	warnings   []string
+	config   *cfg.Config
+	fetched  map[string]*fetched // canonical URL -> fetched file
+	aliases  map[string]string   // requested URL -> canonical URL
+	warnings []string
+}
+
+// errSkip signals that a URL was reachable but served content we don't vendor
+// (typically text/html from a wrong URL). Callers should treat it as a soft
+// skip rather than a hard failure.
+var errSkip = errors.New("unsupported response")
+
+// fetched is the cached result of pass 1 for a single URL.
+type fetched struct {
+	url          *url.URL
+	content      []byte
+	filename     string
+	vendorRel    string            // path on disk relative to v.config.Unpm.Out (host/dir/filename)
+	loader       api.Loader
+	deps         map[string]string // import spec as written in source -> canonical dep URL
+	sourceMap    string            // canonical URL of referenced source map, or ""
+	typesURL     string            // canonical URL of x-typescript-types, or ""
+	sidecar      string            // canonical URL of sidecar .d.ts found alongside, or ""
+	typesContent []byte            // original .ts/.tsx source (kept for type-checking when transpiled to .js)
+	typesRel     string            // vendor path for typesContent (the original .ts/.tsx file)
 }
 
 func Vendor(c *cfg.Config) ([]string, error) {
@@ -40,39 +61,63 @@ func Vendor(c *cfg.Config) ([]string, error) {
 	}
 
 	v := &vendorer{
-		config:     c,
-		downloaded: make(map[string]string),
-		types:      make(map[string]string),
-		esmPaths:   make(map[string]string),
+		config:  c,
+		fetched: make(map[string]*fetched),
+		aliases: make(map[string]string),
 	}
 
-	// download all imports
-	imports := make(map[string]string) // import key -> relative path within out directory
+	// pass 1: fetch every reachable URL and discover dep edges in memory
+	entries := make(map[string]string) // import key -> canonical entry URL
 	for key, rawURL := range c.Imports {
-		relPath, err := v.download(rawURL)
+		canon, err := v.fetch(rawURL)
 		if err != nil {
-			return v.warnings, fmt.Errorf("downloading %q: %w", key, err)
+			if errors.Is(err, errSkip) {
+				continue
+			}
+			return v.warnings, fmt.Errorf("fetching %q: %w", key, err)
 		}
-
-		imports[key] = path.Join(c.Unpm.Root, relPath)
+		entries[key] = canon
 	}
 
-	if err := writeImportMap(c.Unpm.Out, imports, c.Unpm.Verbose); err != nil {
+	// pass 2: write each fetched file to disk at host/dir/filename, rewriting
+	// imports to relative paths between vendor locations
+	for canon := range v.fetched {
+		if err := v.writeOne(canon); err != nil {
+			return v.warnings, fmt.Errorf("writing %s: %w", canon, err)
+		}
+	}
+
+	importMap := make(map[string]string) // import key -> URL path within out directory
+	typesMap := make(map[string]string)  // import key -> vendor-relative types path
+	for key, entry := range entries {
+		f := v.fetched[entry]
+		if f == nil {
+			continue
+		}
+		importMap[key] = path.Join(c.Unpm.Root, f.vendorRel)
+
+		// types: x-typescript-types > sidecar .d.ts > original .ts source > entry file itself
+		typesCanon := entry
+		switch {
+		case f.typesURL != "":
+			typesCanon = f.typesURL
+		case f.sidecar != "":
+			typesCanon = f.sidecar
+		}
+		if tf, ok := v.fetched[typesCanon]; ok && typesCanon != entry {
+			typesMap[key] = "./" + tf.vendorRel
+		} else if f.typesRel != "" {
+			typesMap[key] = "./" + f.typesRel
+		} else {
+			typesMap[key] = "./" + f.vendorRel
+		}
+	}
+
+	if err := writeImportMap(c.Unpm.Out, importMap, c.Unpm.Verbose); err != nil {
 		return v.warnings, err
 	}
 
-	// build types mapping: import key -> types path within out directory
-	// use x-typescript-types if available, otherwise fall back to the JS file itself
-	types := make(map[string]string)
-	for key, rawURL := range c.Imports {
-		if typesRel, ok := v.types[rawURL]; ok {
-			types[key] = "./" + typesRel
-		} else {
-			types[key] = "./" + v.downloaded[rawURL]
-		}
-	}
-
-	if err := writeTypesDts(c.Unpm.Out, types, c.Unpm.Verbose); err != nil {
+	if err := writeTypesDts(c.Unpm.Out, typesMap, c.Unpm.Verbose); err != nil {
 		return v.warnings, err
 	}
 
@@ -386,64 +431,74 @@ func walkImports(outDir, relPath string, reachable map[string]bool) error {
 // For dynamic imports: captures "import(" prefix (group 5), quote char (group 6), path (group 7), closing quote + ")" (group 8).
 var importRe = regexp.MustCompile(`(\b(?:import|export)\s*(?:[^"']*\bfrom\s*|))(["'])((?:[a-zA-Z]+://|/|\.\.?/)[^"']+)(["'])|(\bimport\s*\(\s*)(["'])((?:[a-zA-Z]+://|/|\.\.?/)[^"']+)(["']\s*\))`)
 
+// typeImportRe matches `import type ... from "spec"` and `export type ... from "spec"`
+// statements. esbuild elides these from its output before OnResolve runs, so we
+// can't rely on the parser to discover the deps — we have to find them ourselves.
+var typeImportRe = regexp.MustCompile(`(?m)(?:^|[\s;])(?:import|export)\s+type\b[^"';\n]*?["']([^"']+)["']`)
+
 // sourceMappingRe matches //# sourceMappingURL=... comments.
 var sourceMappingRe = regexp.MustCompile(`(//[#@]\s*sourceMappingURL\s*=\s*)(\S+)`)
 
-func (v *vendorer) download(fullURL string) (string, error) {
-	// if already downloaded, no need to continue
-	if relativePath, ok := v.downloaded[fullURL]; ok {
-		return relativePath, nil
+// fetch downloads a URL, follows x-esm-path shims, caches the bytes in memory,
+// and recursively enumerates the URLs referenced by the file. It returns the
+// canonical URL that identifies the file in v.fetched.
+func (v *vendorer) fetch(rawURL string) (string, error) {
+	if canon, ok := v.aliases[rawURL]; ok {
+		return canon, nil
 	}
 
-	// fetch the url
-	u, err := url.Parse(fullURL)
+	u, err := url.Parse(rawURL)
 	if err != nil {
-		return "", fmt.Errorf("parsing URL %s: %w", fullURL, err)
+		return "", fmt.Errorf("parsing URL %s: %w", rawURL, err)
 	}
 
-	// download the file
-	resp, err := http.Get(fullURL)
+	resp, err := http.Get(rawURL)
 	if err != nil {
-		return "", fmt.Errorf("fetching %s: %w", fullURL, err)
+		return "", fmt.Errorf("fetching %s: %w", rawURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("fetching %s: status %d", fullURL, resp.StatusCode)
+		return "", fmt.Errorf("fetching %s: status %d", rawURL, resp.StatusCode)
+	}
+
+	if ct := resp.Header.Get("Content-Type"); isUnvendorableContentType(ct) {
+		v.warnings = append(v.warnings, fmt.Sprintf("skipping %s: unexpected content-type %q", rawURL, ct))
+		return "", errSkip
 	}
 
 	// esm.sh returns x-esm-path with the canonical resolved path;
-	// skip the shim and download the resolved module directly
+	// skip the shim and fetch the resolved module directly
 	if esmPath := resp.Header.Get("x-esm-path"); esmPath != "" {
-		if resolved, ok := v.esmPaths[esmPath]; ok {
-			v.downloaded[fullURL] = resolved
-			return resolved, nil
-		}
+		canonURL := u.Scheme + "://" + u.Host + esmPath
+		v.aliases[rawURL] = canonURL
 
-		// construct canonical URL
-		canonicalURL := u.Scheme + "://" + u.Host + esmPath
-		rel, err := v.download(canonicalURL)
+		canon, err := v.fetch(canonURL)
 		if err != nil {
-			return "", fmt.Errorf("downloading canonical path for %s: %w", fullURL, err)
+			return "", fmt.Errorf("downloading canonical path for %s: %w", rawURL, err)
+		}
+		if canon != canonURL {
+			v.aliases[rawURL] = canon
 		}
 
-		v.downloaded[fullURL] = rel
-		v.esmPaths[esmPath] = rel
-
-		// Check for type definitions before returning —
 		// the x-typescript-types header is on this response, not the canonical one
 		if typesURL := resp.Header.Get("x-typescript-types"); typesURL != "" {
 			if strings.HasPrefix(typesURL, "/") {
 				typesURL = u.Scheme + "://" + u.Host + typesURL
 			}
-			if typesRel, err := v.download(typesURL); err != nil {
-				v.warnings = append(v.warnings, fmt.Sprintf("failed to download types for %s: %v", fullURL, err))
-			} else {
-				v.types[fullURL] = typesRel
+			if tcanon, err := v.fetch(typesURL); err != nil {
+				v.warnings = append(v.warnings, fmt.Sprintf("failed to download types for %s: %v", rawURL, err))
+			} else if f, ok := v.fetched[canon]; ok {
+				f.typesURL = tcanon
 			}
 		}
 
-		return rel, nil
+		return canon, nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", rawURL, err)
 	}
 
 	// derive local file path from the original URL's host + path.
@@ -452,7 +507,7 @@ func (v *vendorer) download(fullURL string) (string, error) {
 	var localDir, filename string
 	ext := strings.ToLower(path.Ext(u.Path))
 	switch ext {
-	case ".js", ".mjs", ".mts", ".ts", ".css", ".json", ".wasm", ".map":
+	case ".js", ".mjs", ".jsx", ".ts", ".tsx", ".mts", ".css", ".json", ".wasm", ".map":
 		localDir = path.Join(u.Host, path.Dir(u.Path))
 		filename = path.Base(u.Path)
 	default:
@@ -466,165 +521,516 @@ func (v *vendorer) download(fullURL string) (string, error) {
 
 		fext := strings.ToLower(path.Ext(filename))
 		switch fext {
-		case ".js", ".mjs", ".mts", ".ts", ".css", ".json", ".wasm", ".map":
+		case ".js", ".mjs", ".jsx", ".ts", ".tsx", ".mts", ".css", ".json", ".wasm", ".map":
 			// keep as-is
 		default:
 			filename += ".js"
 		}
 	}
 
-	// create the directory
-	dir := filepath.Join(v.config.Unpm.Out, filepath.FromSlash(localDir))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("creating directory %s: %w", dir, err)
+	canon := u.String()
+	v.aliases[rawURL] = canon
+
+	f := &fetched{
+		url:       u,
+		content:   body,
+		filename:  filename,
+		vendorRel: path.Join(localDir, filename),
+		loader:    loaderFor(filename),
+		deps:      make(map[string]string),
 	}
+	v.fetched[canon] = f
 
-	destPath := filepath.Join(dir, filename)
-	rel, _ := filepath.Rel(v.config.Unpm.Out, destPath)
-	rel = filepath.ToSlash(rel)
-
-	// register before recursing to prevent cycles
-	v.downloaded[fullURL] = rel
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", fullURL, err)
-	}
-
-	// if the file is pinned, skip writing to preserve local modifications
-	if v.config.IsPinned(rel) {
-		if v.config.Unpm.Verbose {
-			fmt.Printf("%s -> %s (pinned)\n", fullURL, rel)
+	switch {
+	case f.loader != api.LoaderNone:
+		if err := v.discoverESBuild(u, f); err != nil {
+			return "", fmt.Errorf("discovering imports in %s: %w", rawURL, err)
 		}
-	} else {
-		content := string(body)
+		if f.loader == api.LoaderTS || f.loader == api.LoaderTSX {
+			v.discoverTypeImports(u, f)
+		}
+	case strings.HasSuffix(strings.ToLower(filename), ".map"):
+		// source maps reference nothing further
+	default:
+		v.discoverRegex(u, f)
+	}
 
-		// Only rewrite imports and source maps in code files, not in .map files
-		if strings.ToLower(path.Ext(u.Path)) != ".map" {
-			// Find and recursively download origin-relative and relative imports, rewriting paths
-			content, err = v.rewriteImports(u, content, rel)
-			if err != nil {
-				return "", fmt.Errorf("rewriting imports in %s: %w", fullURL, err)
+	if !strings.HasSuffix(strings.ToLower(filename), ".map") {
+		for _, m := range sourceMappingRe.FindAllStringSubmatch(string(body), -1) {
+			mapPath := m[2]
+			if strings.HasPrefix(mapPath, "data:") {
+				continue
 			}
-
-			// Download source maps referenced by //# sourceMappingURL=...
-			content = v.rewriteSourceMap(u, content, rel)
-		}
-
-		if err := os.WriteFile(destPath, []byte(content), 0o644); err != nil {
-			return "", fmt.Errorf("writing %s: %w", destPath, err)
-		}
-
-		if v.config.Unpm.Verbose {
-			fmt.Printf("%s -> %s\n", fullURL, rel)
+			var mapURL string
+			if strings.HasPrefix(mapPath, "/") {
+				mapURL = u.Scheme + "://" + u.Host + mapPath
+			} else {
+				mapURL = u.Scheme + "://" + u.Host + path.Join(path.Dir(u.Path), mapPath)
+			}
+			if smCanon, err := v.fetch(mapURL); err != nil {
+				v.warnings = append(v.warnings, fmt.Sprintf("failed to download source map %s: %v", mapURL, err))
+			} else {
+				f.sourceMap = smCanon
+			}
 		}
 	}
 
-	// If the response includes type definitions, download them too
 	if typesURL := resp.Header.Get("x-typescript-types"); typesURL != "" {
 		if strings.HasPrefix(typesURL, "/") {
 			typesURL = u.Scheme + "://" + u.Host + typesURL
 		}
-		if typesRel, err := v.download(typesURL); err != nil {
-			v.warnings = append(v.warnings, fmt.Sprintf("failed to download types for %s: %v", fullURL, err))
+		if tcanon, err := v.fetch(typesURL); err != nil {
+			v.warnings = append(v.warnings, fmt.Sprintf("failed to download types for %s: %v", rawURL, err))
 		} else {
-			v.types[fullURL] = typesRel
+			f.typesURL = tcanon
 		}
 	}
 
-	return rel, nil
-}
+	// try a "sidecar" .d.ts at the same URL with the extension replaced.
+	// e.g. https://esm.sh/foo.mjs -> https://esm.sh/foo.d.ts. A 404 is fine —
+	// most files don't ship sidecar types — so failures are silent.
+	if sURL := sidecarURL(u, f); sURL != "" {
+		if scanon, err := v.fetch(sURL); err == nil {
+			f.sidecar = scanon
+		}
+	}
 
-func (v *vendorer) rewriteImports(u *url.URL, content, currentFileRel string) (string, error) {
-	currentDir := path.Dir(currentFileRel)
-	origin := u.Scheme + "://" + u.Host
-	var rewriteErr error
-
-	result := importRe.ReplaceAllStringFunc(content, func(match string) string {
-		if rewriteErr != nil {
-			return match
+	// TypeScript sources are transpiled to JavaScript for the runtime artifact.
+	// The original .ts content is kept as a sibling on disk so type-checking
+	// can still resolve it (TS will pick a sidecar .d.ts over the .ts when both
+	// exist). Imports were already discovered above using the TS loader.
+	if f.loader == api.LoaderTS || f.loader == api.LoaderTSX {
+		res := api.Transform(string(body), api.TransformOptions{
+			Loader:     f.loader,
+			Sourcefile: u.String(),
+		})
+		if len(res.Errors) > 0 {
+			return "", fmt.Errorf("transpiling %s: %s", rawURL, res.Errors[0].Text)
 		}
 
-		groups := importRe.FindStringSubmatch(match)
+		f.typesContent = body
+		f.typesRel = f.vendorRel
 
-		// determine prefix, quote, and path from either static (groups 1-4) or dynamic (groups 5-8) branch
-		var prefix, quote, impPath, suffix string
-		if groups[1] != "" {
-			prefix = groups[1]
-			quote = groups[2]
-			impPath = groups[3]
-			suffix = groups[4]
-		} else {
-			prefix = groups[5]
-			quote = groups[6]
-			impPath = groups[7]
-			suffix = groups[8]
+		origExt := path.Ext(f.filename)
+		newExt := ".js"
+		if strings.EqualFold(origExt, ".mts") {
+			newExt = ".mjs"
+		}
+		f.filename = strings.TrimSuffix(f.filename, origExt) + newExt
+		f.vendorRel = path.Join(path.Dir(f.vendorRel), f.filename)
+		f.content = res.Code
+		f.loader = api.LoaderJS
+	}
+
+	return canon, nil
+}
+
+// resolveAndFetch fetches depURL, falling back to extension-search candidates
+// when the importing file uses bundler-style or TypeScript-style resolution.
+// For example, `import x from "./render"` in a .js file should match render.js;
+// the same spec in a .ts file should also try render.ts / render.d.ts first.
+// Failures are silent except for the last error returned.
+func (v *vendorer) resolveAndFetch(depURL string, parentLoader api.Loader) (string, error) {
+	if canon, ok := v.aliases[depURL]; ok {
+		return canon, nil
+	}
+
+	canon, err := v.fetch(depURL)
+	if err == nil {
+		return canon, nil
+	}
+
+	candidates := resolveCandidates(depURL, parentLoader)
+	if len(candidates) == 0 {
+		return "", err
+	}
+
+	sawSkip := errors.Is(err, errSkip)
+	for _, candidate := range candidates {
+		c, e := v.fetch(candidate)
+		if e == nil {
+			v.aliases[depURL] = c
+			return c, nil
+		}
+		if errors.Is(e, errSkip) {
+			sawSkip = true
+		}
+	}
+	if sawSkip {
+		return "", errSkip
+	}
+	return "", err
+}
+
+// resolveCandidates returns the URLs to try for an extension-less or
+// TS-source-style import that couldn't be fetched as-is. The candidate set
+// depends on the parent file's loader: JS source gets bundler-style .js/.mjs
+// and /index.* variants; TS source gets the TS extensions plus those JS
+// fallbacks.
+func resolveCandidates(depURL string, parentLoader api.Loader) []string {
+	u, err := url.Parse(depURL)
+	if err != nil {
+		return nil
+	}
+	ext := strings.ToLower(path.Ext(u.Path))
+	base := strings.TrimSuffix(u.Path, ext)
+
+	jsBare := []string{
+		u.Path + ".js", u.Path + ".mjs",
+		u.Path + "/index.js", u.Path + "/index.mjs",
+	}
+	tsBare := []string{
+		u.Path + ".ts", u.Path + ".tsx", u.Path + ".d.ts",
+		u.Path + "/index.ts", u.Path + "/index.tsx", u.Path + "/index.d.ts",
+	}
+
+	var paths []string
+	switch parentLoader {
+	case api.LoaderTS, api.LoaderTSX:
+		switch ext {
+		case ".js":
+			paths = []string{base + ".ts", base + ".tsx", base + ".d.ts"}
+		case ".mjs":
+			paths = []string{base + ".mts", base + ".d.mts"}
+		case ".jsx":
+			paths = []string{base + ".tsx"}
+		case "":
+			paths = append(append([]string{}, tsBare...), jsBare...)
+		}
+	case api.LoaderJS:
+		if ext == "" {
+			paths = jsBare
+		}
+	}
+
+	if len(paths) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		nu := *u
+		nu.Path = p
+		out = append(out, nu.String())
+	}
+	return out
+}
+
+// isUnvendorableContentType returns true for Content-Type values that clearly
+// indicate the server isn't returning a module asset — typically because the
+// URL points at a web page rather than a raw file (e.g. github.com/.../blob/...
+// instead of raw.githubusercontent.com).
+func isUnvendorableContentType(ct string) bool {
+	if idx := strings.Index(ct, ";"); idx >= 0 {
+		ct = ct[:idx]
+	}
+	switch strings.ToLower(strings.TrimSpace(ct)) {
+	case "text/html", "application/xhtml+xml":
+		return true
+	}
+	return false
+}
+
+// sidecarURL returns the URL of the .d.ts file that may live alongside a script
+// file (e.g. foo.mjs -> foo.d.ts), or "" if no sidecar lookup is appropriate.
+func sidecarURL(u *url.URL, f *fetched) string {
+	if f.loader == api.LoaderNone {
+		return ""
+	}
+	ext := path.Ext(u.Path)
+	if ext == "" {
+		return ""
+	}
+	s := *u
+	s.Path = strings.TrimSuffix(u.Path, ext) + ".d.ts"
+	return s.String()
+}
+
+// loaderFor returns the esbuild loader for the given filename. Returns
+// api.LoaderNone for files that should not be processed by esbuild (e.g.
+// .d.ts declarations or non-script assets).
+func loaderFor(filename string) api.Loader {
+	f := strings.ToLower(filename)
+	if strings.HasSuffix(f, ".d.ts") {
+		return api.LoaderNone
+	}
+	switch filepath.Ext(f) {
+	case ".ts", ".mts":
+		return api.LoaderTS
+	case ".tsx":
+		return api.LoaderTSX
+	case ".jsx":
+		return api.LoaderJSX
+	case ".js", ".mjs":
+		return api.LoaderJS
+	}
+	return api.LoaderNone
+}
+
+// discoverESBuild uses esbuild's parser to enumerate the imports in f.content.
+// esbuild's printed output is discarded - only its import resolution is used.
+func (v *vendorer) discoverESBuild(u *url.URL, f *fetched) error {
+	origin := u.Scheme + "://" + u.Host
+	parentLoader := f.loader
+	var resolveErr error
+
+	api.Build(api.BuildOptions{
+		Bundle:   true,
+		Write:    false,
+		LogLevel: api.LogLevelSilent,
+		Stdin: &api.StdinOptions{
+			Contents:   string(f.content),
+			Sourcefile: u.String(),
+			Loader:     f.loader,
+		},
+		Plugins: []api.Plugin{{
+			Name: "unpm",
+			Setup: func(build api.PluginBuild) {
+				build.OnResolve(api.OnResolveOptions{Filter: ".*"}, func(args api.OnResolveArgs) (api.OnResolveResult, error) {
+					if resolveErr != nil {
+						return api.OnResolveResult{Path: args.Path, External: true}, nil
+					}
+
+					spec := args.Path
+					var depURL string
+					switch {
+					case strings.Contains(spec, "://"):
+						depURL = spec
+					case strings.HasPrefix(spec, "/"):
+						depURL = origin + spec
+					case strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../"):
+						depURL = origin + path.Join(path.Dir(u.Path), spec)
+					default:
+						// bare specifier - findBareImports will warn later
+						return api.OnResolveResult{Path: spec, External: true}, nil
+					}
+
+					depCanon, err := v.resolveAndFetch(depURL, parentLoader)
+					if err != nil {
+						if errors.Is(err, errSkip) {
+							return api.OnResolveResult{Path: spec, External: true}, nil
+						}
+						resolveErr = err
+						return api.OnResolveResult{Path: spec, External: true}, err
+					}
+					f.deps[spec] = depCanon
+					return api.OnResolveResult{Path: spec, External: true}, nil
+				})
+			},
+		}},
+	})
+
+	return resolveErr
+}
+
+// discoverTypeImports enumerates `import type` / `export type` statements in
+// TS source, which esbuild elides before OnResolve sees them. Fetched deps are
+// recorded on f.deps so the file ends up on disk for TS to resolve against;
+// the .ts source itself is written verbatim so the original specs stay intact.
+func (v *vendorer) discoverTypeImports(u *url.URL, f *fetched) {
+	origin := u.Scheme + "://" + u.Host
+
+	for _, groups := range typeImportRe.FindAllStringSubmatch(string(f.content), -1) {
+		spec := groups[1]
+		if _, seen := f.deps[spec]; seen {
+			continue
 		}
 
 		var depURL string
 		switch {
-		case strings.Contains(impPath, "://"):
-			depURL = impPath
-		case strings.HasPrefix(impPath, "/"):
-			depURL = origin + impPath
+		case strings.Contains(spec, "://"):
+			depURL = spec
+		case strings.HasPrefix(spec, "/"):
+			depURL = origin + spec
+		case strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../"):
+			depURL = origin + path.Join(path.Dir(u.Path), spec)
 		default:
-			depURL = origin + path.Join(path.Dir(u.Path), impPath)
+			continue
 		}
 
-		depRel, err := v.download(depURL)
+		depCanon, err := v.resolveAndFetch(depURL, api.LoaderTS)
 		if err != nil {
-			rewriteErr = err
-			return match
+			continue
 		}
-
-		// Compute relative path from current file's directory to the downloaded dep
-		relFromHere, _ := filepath.Rel(currentDir, depRel)
-		relFromHere = filepath.ToSlash(relFromHere)
-		if !strings.HasPrefix(relFromHere, ".") {
-			relFromHere = "./" + relFromHere
-		}
-
-		return prefix + quote + relFromHere + suffix
-	})
-
-	return result, rewriteErr
+		f.deps[spec] = depCanon
+	}
 }
 
-func (v *vendorer) rewriteSourceMap(u *url.URL, content, currentFileRel string) string {
-	currentDir := path.Dir(currentFileRel)
+// discoverRegex enumerates imports in non-script files (notably .d.ts) using a
+// regex. Bare specifiers are skipped because importRe matches only paths that
+// begin with a scheme, "/", "./", or "../".
+func (v *vendorer) discoverRegex(u *url.URL, f *fetched) {
 	origin := u.Scheme + "://" + u.Host
+	parentLoader := api.LoaderNone
+	if strings.HasSuffix(strings.ToLower(f.filename), ".d.ts") {
+		parentLoader = api.LoaderTS
+	}
 
-	return sourceMappingRe.ReplaceAllStringFunc(content, func(match string) string {
-		groups := sourceMappingRe.FindStringSubmatch(match)
-		prefix := groups[1]
-		mapPath := groups[2]
-
-		// Skip data: URLs
-		if strings.HasPrefix(mapPath, "data:") {
-			return match
-		}
-
-		var mapURL string
-		if strings.HasPrefix(mapPath, "/") {
-			mapURL = origin + mapPath
+	for _, groups := range importRe.FindAllStringSubmatch(string(f.content), -1) {
+		var spec string
+		if groups[1] != "" {
+			spec = groups[3]
 		} else {
-			mapURL = origin + path.Join(path.Dir(u.Path), mapPath)
+			spec = groups[7]
+		}
+		if _, seen := f.deps[spec]; seen {
+			continue
 		}
 
-		mapRel, err := v.download(mapURL)
+		var depURL string
+		switch {
+		case strings.Contains(spec, "://"):
+			depURL = spec
+		case strings.HasPrefix(spec, "/"):
+			depURL = origin + spec
+		default:
+			depURL = origin + path.Join(path.Dir(u.Path), spec)
+		}
+
+		depCanon, err := v.resolveAndFetch(depURL, parentLoader)
 		if err != nil {
-			v.warnings = append(v.warnings, fmt.Sprintf("failed to download source map %s: %v", mapURL, err))
-			return match
+			v.warnings = append(v.warnings, fmt.Sprintf("failed to download %s: %v", depURL, err))
+			continue
 		}
+		f.deps[spec] = depCanon
+	}
+}
 
-		relFromHere, _ := filepath.Rel(currentDir, mapRel)
-		relFromHere = filepath.ToSlash(relFromHere)
-		if !strings.HasPrefix(relFromHere, ".") {
-			relFromHere = "./" + relFromHere
+// writeOne writes a single fetched file to disk, rewriting its imports and
+// source map reference to relative paths between vendor locations.
+func (v *vendorer) writeOne(canon string) error {
+	f := v.fetched[canon]
+	if f == nil {
+		return nil
+	}
+
+	destPath := filepath.Join(v.config.Unpm.Out, filepath.FromSlash(f.vendorRel))
+
+	if v.config.IsPinned(f.vendorRel) {
+		if v.config.Unpm.Verbose {
+			fmt.Printf("%s -> %s (pinned)\n", canon, f.vendorRel)
 		}
+		return nil
+	}
 
-		return prefix + relFromHere
-	})
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return fmt.Errorf("creating directory %s: %w", filepath.Dir(destPath), err)
+	}
+
+	var content []byte
+	if strings.HasSuffix(strings.ToLower(f.filename), ".map") {
+		content = f.content
+	} else {
+		content = v.rewrite(f)
+	}
+
+	if err := os.WriteFile(destPath, content, 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", destPath, err)
+	}
+
+	if v.config.Unpm.Verbose {
+		fmt.Printf("%s -> %s\n", canon, f.vendorRel)
+	}
+
+	// Also write the original .ts/.tsx source alongside the transpiled .js for
+	// type-checking. TypeScript resolves relative imports against sibling .ts
+	// files, so the unrewritten source works for type-only consumption.
+	if f.typesContent != nil && f.typesRel != "" && f.typesRel != f.vendorRel {
+		typesPath := filepath.Join(v.config.Unpm.Out, filepath.FromSlash(f.typesRel))
+		if v.config.IsPinned(f.typesRel) {
+			if v.config.Unpm.Verbose {
+				fmt.Printf("%s -> %s (pinned)\n", canon, f.typesRel)
+			}
+		} else {
+			if err := os.MkdirAll(filepath.Dir(typesPath), 0o755); err != nil {
+				return fmt.Errorf("creating directory %s: %w", filepath.Dir(typesPath), err)
+			}
+			if err := os.WriteFile(typesPath, f.typesContent, 0o644); err != nil {
+				return fmt.Errorf("writing %s: %w", typesPath, err)
+			}
+			if v.config.Unpm.Verbose {
+				fmt.Printf("%s -> %s\n", canon, f.typesRel)
+			}
+		}
+	}
+	return nil
+}
+
+// rewrite substitutes import specs and the sourceMappingURL in f.content with
+// paths relative to f.vendorRel using the vendor locations of f's deps.
+func (v *vendorer) rewrite(f *fetched) []byte {
+	currentDir := path.Dir(f.vendorRel)
+
+	rewrites := make(map[string]string, len(f.deps))
+	for spec, dep := range f.deps {
+		df, ok := v.fetched[dep]
+		if !ok {
+			continue
+		}
+		rel, _ := filepath.Rel(currentDir, df.vendorRel)
+		rel = filepath.ToSlash(rel)
+		if !strings.HasPrefix(rel, ".") {
+			rel = "./" + rel
+		}
+		rewrites[spec] = rel
+	}
+
+	var result string
+	if f.loader != api.LoaderNone {
+		// JS/TS: substitute by spec on the original source bytes
+		result = string(f.content)
+		for spec, rewritten := range rewrites {
+			if spec == rewritten {
+				continue
+			}
+			result = strings.ReplaceAll(result, `"`+spec+`"`, `"`+rewritten+`"`)
+			result = strings.ReplaceAll(result, `'`+spec+`'`, `'`+rewritten+`'`)
+			result = strings.ReplaceAll(result, "`"+spec+"`", "`"+rewritten+"`")
+		}
+	} else {
+		// .d.ts and other text files: regex-based per-match substitution
+		result = importRe.ReplaceAllStringFunc(string(f.content), func(match string) string {
+			groups := importRe.FindStringSubmatch(match)
+			var prefix, quote, impPath, suffix string
+			if groups[1] != "" {
+				prefix = groups[1]
+				quote = groups[2]
+				impPath = groups[3]
+				suffix = groups[4]
+			} else {
+				prefix = groups[5]
+				quote = groups[6]
+				impPath = groups[7]
+				suffix = groups[8]
+			}
+			rewritten, ok := rewrites[impPath]
+			if !ok {
+				return match
+			}
+			return prefix + quote + rewritten + suffix
+		})
+	}
+
+	if f.sourceMap != "" {
+		result = sourceMappingRe.ReplaceAllStringFunc(result, func(match string) string {
+			groups := sourceMappingRe.FindStringSubmatch(match)
+			if strings.HasPrefix(groups[2], "data:") {
+				return match
+			}
+			df, ok := v.fetched[f.sourceMap]
+			if !ok {
+				return match
+			}
+			rel, _ := filepath.Rel(currentDir, df.vendorRel)
+			rel = filepath.ToSlash(rel)
+			if !strings.HasPrefix(rel, ".") {
+				rel = "./" + rel
+			}
+			return groups[1] + rel
+		})
+	}
+
+	return []byte(result)
 }
 
 func writeImportMap(outDir string, rewritten map[string]string, verbose bool) error {

@@ -313,7 +313,7 @@ func TestVendor_TypeScriptTypesWithEsmPath(t *testing.T) {
 
 	host := strings.TrimPrefix(srv.URL, "http://")
 
-	// .d.ts file should be downloaded
+	// .d.ts file should be downloaded at its source path
 	dtsPath := filepath.Join(outDir, host, "preact@10", "src", "index.d.ts")
 	if _, err := os.Stat(dtsPath); err != nil {
 		t.Fatalf(".d.ts file not downloaded: %v", err)
@@ -430,6 +430,38 @@ func TestVendor_DynamicImport(t *testing.T) {
 	}
 }
 
+func TestVendor_StringLiteralLooksLikeImport(t *testing.T) {
+	// A string literal containing import-like syntax must NOT trigger a fetch.
+	// The regex-based rewriter used to choke on this; the esbuild parser
+	// correctly identifies that the inner text is not a real import.
+	srv := newTestServer(map[string]testFile{
+		"/entry.js": {body: `const example = 'import x from "./not-real.js"'; export default example;`},
+	})
+	defer srv.Close()
+
+	outDir := filepath.Join(t.TempDir(), "vendor")
+	c := &cfg.Config{
+		Imports: map[string]string{"entry": srv.URL + "/entry.js"},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
+	}
+	if _, err := unpm.Vendor(c); err != nil {
+		t.Fatal(err)
+	}
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	// The fake import inside the string must not have been fetched
+	if _, err := os.Stat(filepath.Join(outDir, host, "not-real.js")); !os.IsNotExist(err) {
+		t.Fatalf("string-literal import path should not have been vendored")
+	}
+
+	// And the original string content must be preserved verbatim
+	data, _ := os.ReadFile(filepath.Join(outDir, host, "entry.js"))
+	if !strings.Contains(string(data), `'import x from "./not-real.js"'`) {
+		t.Fatalf("string literal was modified: %s", data)
+	}
+}
+
 func TestVendor_Pin(t *testing.T) {
 	srv := newTestServer(map[string]testFile{
 		"/a.js": {body: `export const a = 1;`},
@@ -508,6 +540,291 @@ func TestVendor_Pin(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestVendor_ParentImport(t *testing.T) {
+	// An entry that imports a file from a parent directory should produce a
+	// relative ../ import between the two vendored locations.
+	srv := newTestServer(map[string]testFile{
+		"/src/index.mjs": {body: `import { c } from "../consts.mjs"; export const x = c;`},
+		"/consts.mjs":    {body: `export const c = 1;`},
+	})
+	defer srv.Close()
+
+	outDir := filepath.Join(t.TempDir(), "vendor")
+	c := &cfg.Config{
+		Imports: map[string]string{"htm": srv.URL + "/src/index.mjs"},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
+	}
+	if _, err := unpm.Vendor(c); err != nil {
+		t.Fatal(err)
+	}
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	entryPath := filepath.Join(outDir, host, "src", "index.mjs")
+	constsPath := filepath.Join(outDir, host, "consts.mjs")
+	if _, err := os.Stat(entryPath); err != nil {
+		t.Fatalf("entry not at %s: %v", entryPath, err)
+	}
+	if _, err := os.Stat(constsPath); err != nil {
+		t.Fatalf("consts not at %s: %v", constsPath, err)
+	}
+
+	data, _ := os.ReadFile(entryPath)
+	if !strings.Contains(string(data), `"../consts.mjs"`) {
+		t.Fatalf("expected import to rewrite to ../consts.mjs, got: %s", data)
+	}
+
+	imData, _ := os.ReadFile(filepath.Join(outDir, "importmap.json"))
+	if !strings.Contains(string(imData), `"/`+host+`/src/index.mjs"`) {
+		t.Fatalf("importmap.json should reference /%s/src/index.mjs, got: %s", host, imData)
+	}
+}
+
+func TestVendor_JSExtensionResolution(t *testing.T) {
+	// A .js file that imports `./render` (no extension) should resolve to
+	// render.js, and `./util` should resolve to util/index.js — the way
+	// bundlers do for Node-style source.
+	srv := newTestServer(map[string]testFile{
+		"/entry.js": {body: `export { x } from "./render"; export { y } from "./util";`},
+		"/render.js": {body: `export const x = 1;`},
+		"/util/index.js": {body: `export const y = 2;`},
+	})
+	defer srv.Close()
+
+	outDir := filepath.Join(t.TempDir(), "vendor")
+	c := &cfg.Config{
+		Imports: map[string]string{"lib": srv.URL + "/entry.js"},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
+	}
+	if _, err := unpm.Vendor(c); err != nil {
+		t.Fatal(err)
+	}
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	if _, err := os.Stat(filepath.Join(outDir, host, "render.js")); err != nil {
+		t.Fatalf("render.js not vendored: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, host, "util", "index.js")); err != nil {
+		t.Fatalf("util/index.js not vendored: %v", err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(outDir, host, "entry.js"))
+	if !strings.Contains(string(data), `"./render.js"`) {
+		t.Fatalf("expected rewrite to ./render.js, got: %s", data)
+	}
+	if !strings.Contains(string(data), `"./util/index.js"`) {
+		t.Fatalf("expected rewrite to ./util/index.js, got: %s", data)
+	}
+}
+
+func TestVendor_TSExtensionResolution(t *testing.T) {
+	// A .ts file that imports "./internal" with no extension should resolve to
+	// internal.ts on the server (the way TypeScript itself resolves it).
+	// Both the transpiled .js and the original .ts source are written.
+	srv := newTestServer(map[string]testFile{
+		"/index.ts":    {body: `import { x } from "./internal"; export const y: number = x;`},
+		"/internal.ts": {body: `export const x: number = 1;`},
+	})
+	defer srv.Close()
+
+	outDir := filepath.Join(t.TempDir(), "vendor")
+	c := &cfg.Config{
+		Imports: map[string]string{"lib": srv.URL + "/index.ts"},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
+	}
+	if _, err := unpm.Vendor(c); err != nil {
+		t.Fatal(err)
+	}
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	// Both the transpiled .js and the original .ts should exist on disk
+	for _, name := range []string{"index.js", "index.ts", "internal.js", "internal.ts"} {
+		if _, err := os.Stat(filepath.Join(outDir, host, name)); err != nil {
+			t.Fatalf("%s not written: %v", name, err)
+		}
+	}
+
+	// The transpiled .js should have its import rewritten to the sibling .js
+	jsData, _ := os.ReadFile(filepath.Join(outDir, host, "index.js"))
+	if !strings.Contains(string(jsData), `"./internal.js"`) {
+		t.Fatalf("expected transpiled import rewritten to ./internal.js, got: %s", jsData)
+	}
+	if strings.Contains(string(jsData), `: number`) {
+		t.Fatalf("transpiled .js should not contain TS type annotations, got: %s", jsData)
+	}
+
+	// The original .ts should be preserved verbatim (TS resolves ./internal naturally)
+	tsData, _ := os.ReadFile(filepath.Join(outDir, host, "index.ts"))
+	if !strings.Contains(string(tsData), `"./internal"`) {
+		t.Fatalf(".ts source should be preserved verbatim, got: %s", tsData)
+	}
+
+	// importmap.json should point at the .js runtime artifact
+	imData, _ := os.ReadFile(filepath.Join(outDir, "importmap.json"))
+	if !strings.Contains(string(imData), `"/`+host+`/index.js"`) {
+		t.Fatalf("importmap should point at /%s/index.js, got: %s", host, imData)
+	}
+
+	// jsconfig.json should point at the .ts source for types
+	jcData, _ := os.ReadFile(filepath.Join(outDir, "jsconfig.json"))
+	if !strings.Contains(string(jcData), `"./`+host+`/index.ts"`) {
+		t.Fatalf("jsconfig should reference ./%s/index.ts, got: %s", host, jcData)
+	}
+}
+
+func TestVendor_HTMLContentTypeSkipped(t *testing.T) {
+	// A URL that returns text/html (typically the wrong URL — e.g. a github.com
+	// blob page instead of a raw file) should be skipped with a warning instead
+	// of being vendored as a fake JS/TS file.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/good.js":
+			w.Header().Set("Content-Type", "application/javascript")
+			w.Write([]byte(`export const x = 1;`))
+		case "/bad.js":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Write([]byte(`<!DOCTYPE html><html></html>`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	outDir := filepath.Join(t.TempDir(), "vendor")
+	c := &cfg.Config{
+		Imports: map[string]string{
+			"good": srv.URL + "/good.js",
+			"bad":  srv.URL + "/bad.js",
+		},
+		Unpm: cfg.Options{Out: outDir, Root: "/"},
+	}
+	warnings, err := unpm.Vendor(c)
+	if err != nil {
+		t.Fatalf("vendor should not fail when one entry returns HTML: %v", err)
+	}
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	// The good entry should be vendored normally
+	if _, err := os.Stat(filepath.Join(outDir, host, "good.js")); err != nil {
+		t.Fatalf("good.js should be vendored: %v", err)
+	}
+
+	// The HTML entry must NOT be saved
+	if _, err := os.Stat(filepath.Join(outDir, host, "bad.js")); !os.IsNotExist(err) {
+		t.Fatalf("bad.js (text/html response) should not be vendored")
+	}
+
+	// A warning should mention the bad URL
+	var found bool
+	for _, w := range warnings {
+		if strings.Contains(w, "/bad.js") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected a warning about bad.js, got: %v", warnings)
+	}
+}
+
+func TestVendor_TypeOnlyImport(t *testing.T) {
+	// `import type` statements are elided by esbuild before OnResolve runs,
+	// so we discover them via regex. The dep must land on disk so the vendored
+	// .ts source file (written verbatim) can still resolve it.
+	srv := newTestServer(map[string]testFile{
+		"/entry.ts":  {body: `import type { Foo } from "./types"; export const x: Foo = null as any;`},
+		"/types.ts": {body: `export type Foo = number;`},
+	})
+	defer srv.Close()
+
+	outDir := filepath.Join(t.TempDir(), "vendor")
+	c := &cfg.Config{
+		Imports: map[string]string{"entry": srv.URL + "/entry.ts"},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
+	}
+	if _, err := unpm.Vendor(c); err != nil {
+		t.Fatal(err)
+	}
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	// The type-only import should still have caused types.ts to be fetched,
+	// so TypeScript can resolve "./types" from the vendored entry.ts sibling.
+	if _, err := os.Stat(filepath.Join(outDir, host, "types.ts")); err != nil {
+		t.Fatalf("types.ts (referenced only by `import type`) not fetched: %v", err)
+	}
+
+	// The transpiled .js should not mention the type-only import (esbuild strips it).
+	jsData, _ := os.ReadFile(filepath.Join(outDir, host, "entry.js"))
+	if strings.Contains(string(jsData), `"./types"`) {
+		t.Fatalf("type-only import should be stripped from transpiled .js, got: %s", jsData)
+	}
+
+	// The .ts source should preserve the original `import type` line.
+	tsData, _ := os.ReadFile(filepath.Join(outDir, host, "entry.ts"))
+	if !strings.Contains(string(tsData), `import type { Foo } from "./types"`) {
+		t.Fatalf(".ts source should preserve type-only import verbatim, got: %s", tsData)
+	}
+}
+
+func TestVendor_SidecarDts(t *testing.T) {
+	// When a script's URL has a sibling .d.ts file, it should be downloaded
+	// automatically and used as the types path in jsconfig.json.
+	srv := newTestServer(map[string]testFile{
+		"/mylib.js":   {body: `export function hello() {}`},
+		"/mylib.d.ts": {body: `export declare function hello(): void;`},
+	})
+	defer srv.Close()
+
+	outDir := filepath.Join(t.TempDir(), "vendor")
+	c := &cfg.Config{
+		Imports: map[string]string{"mylib": srv.URL + "/mylib.js"},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
+	}
+	if _, err := unpm.Vendor(c); err != nil {
+		t.Fatal(err)
+	}
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	// Sidecar .d.ts should have been discovered and downloaded
+	dtsPath := filepath.Join(outDir, host, "mylib.d.ts")
+	if _, err := os.Stat(dtsPath); err != nil {
+		t.Fatalf("sidecar .d.ts not downloaded: %v", err)
+	}
+
+	// jsconfig.json should point at the sidecar, not the .js fallback
+	data, _ := os.ReadFile(filepath.Join(outDir, "jsconfig.json"))
+	if !strings.Contains(string(data), "mylib.d.ts") {
+		t.Fatalf("jsconfig.json should reference sidecar .d.ts, got: %s", data)
+	}
+}
+
+func TestVendor_SidecarDtsMissing(t *testing.T) {
+	// A 404 on the sidecar lookup must not fail the vendor run.
+	srv := newTestServer(map[string]testFile{
+		"/mylib.js": {body: `export function hello() {}`},
+	})
+	defer srv.Close()
+
+	outDir := filepath.Join(t.TempDir(), "vendor")
+	c := &cfg.Config{
+		Imports: map[string]string{"mylib": srv.URL + "/mylib.js"},
+		Unpm:    cfg.Options{Out: outDir, Root: "/"},
+	}
+	if _, err := unpm.Vendor(c); err != nil {
+		t.Fatalf("vendor should succeed even when sidecar is absent: %v", err)
+	}
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+	if _, err := os.Stat(filepath.Join(outDir, host, "mylib.d.ts")); !os.IsNotExist(err) {
+		t.Fatalf("nonexistent sidecar should not be written")
+	}
 }
 
 func TestCheck(t *testing.T) {
