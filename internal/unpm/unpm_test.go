@@ -587,8 +587,8 @@ func TestVendor_JSExtensionResolution(t *testing.T) {
 	// render.js, and `./util` should resolve to util/index.js — the way
 	// bundlers do for Node-style source.
 	srv := newTestServer(map[string]testFile{
-		"/entry.js": {body: `export { x } from "./render"; export { y } from "./util";`},
-		"/render.js": {body: `export const x = 1;`},
+		"/entry.js":      {body: `export { x } from "./render"; export { y } from "./util";`},
+		"/render.js":     {body: `export const x = 1;`},
 		"/util/index.js": {body: `export const y = 2;`},
 	})
 	defer srv.Close()
@@ -737,7 +737,7 @@ func TestVendor_TypeOnlyImport(t *testing.T) {
 	// so we discover them via regex. The dep must land on disk so the vendored
 	// .ts source file (written verbatim) can still resolve it.
 	srv := newTestServer(map[string]testFile{
-		"/entry.ts":  {body: `import type { Foo } from "./types"; export const x: Foo = null as any;`},
+		"/entry.ts": {body: `import type { Foo } from "./types"; export const x: Foo = null as any;`},
 		"/types.ts": {body: `export type Foo = number;`},
 	})
 	defer srv.Close()
