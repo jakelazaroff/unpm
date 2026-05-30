@@ -54,8 +54,7 @@ type fetched struct {
 	deps      map[string]string // import spec as written in source -> canonical dep URL
 	sourceMap string            // canonical URL of referenced source map, or ""
 
-	typesURL string         // canonical URL of x-typescript-types, or ""
-	sidecar  string         // canonical URL of sidecar .d.ts found alongside, or ""
+	typesRef string         // canonical URL of the file's types (x-typescript-types header, else sidecar .d.ts), or ""
 	types    *typesArtifact // original TS source, set when the runtime artifact was transpiled to JS
 }
 
@@ -117,13 +116,10 @@ func Vendor(c *cfg.Config) ([]string, error) {
 		}
 		importMap[key] = path.Join(c.Unpm.Root, f.vendorRel)
 
-		// types: x-typescript-types > sidecar .d.ts > original .ts source > entry file itself
+		// types: x-typescript-types / sidecar .d.ts > original .ts source > entry file itself
 		typesCanon := entry
-		switch {
-		case f.typesURL != "":
-			typesCanon = f.typesURL
-		case f.sidecar != "":
-			typesCanon = f.sidecar
+		if f.typesRef != "" {
+			typesCanon = f.typesRef
 		}
 		if tf, ok := v.fetched[typesCanon]; ok && typesCanon != entry {
 			typesMap[key] = "./" + tf.vendorRel
@@ -567,11 +563,14 @@ func (v *vendorer) fetch(rawURL string) (canon string, err error) {
 
 	v.attachTypesHeader(u, resp, rawURL, f)
 
-	// try a "sidecar" .d.ts at the same URL with the extension replaced
-	// (e.g. foo.mjs -> foo.d.ts). 404s are expected and silent.
-	if sURL := sidecarURL(u, f); sURL != "" {
-		if scanon, err := v.fetch(sURL); err == nil {
-			f.sidecar = scanon
+	// if the response didn't already point us at types, try a "sidecar" .d.ts at
+	// the same URL with the extension replaced (e.g. foo.mjs -> foo.d.ts). 404s
+	// are expected and silent.
+	if f.typesRef == "" {
+		if sURL := sidecarURL(u, f); sURL != "" {
+			if scanon, err := v.fetch(sURL); err == nil {
+				f.typesRef = scanon
+			}
 		}
 	}
 
@@ -764,7 +763,8 @@ func resolveSpec(base *url.URL, spec string) string {
 }
 
 // attachTypesHeader follows the x-typescript-types header on resp and records
-// the result on f.typesURL. Errors are non-fatal — a warning is emitted.
+// the result on f.typesRef. The header is authoritative, so it overwrites any
+// sidecar already found. Errors are non-fatal — a warning is emitted.
 func (v *vendorer) attachTypesHeader(u *url.URL, resp *http.Response, rawURL string, f *fetched) {
 	typesURL := resp.Header.Get("x-typescript-types")
 	if typesURL == "" {
@@ -779,7 +779,7 @@ func (v *vendorer) attachTypesHeader(u *url.URL, resp *http.Response, rawURL str
 		return
 	}
 	if f != nil {
-		f.typesURL = tcanon
+		f.typesRef = tcanon
 	}
 }
 
