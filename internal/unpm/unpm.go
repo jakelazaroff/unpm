@@ -18,7 +18,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -26,6 +25,7 @@ import (
 	"github.com/evanw/esbuild/pkg/api"
 
 	"github.com/jakelazaroff/unpm/internal/cfg"
+	"github.com/jakelazaroff/unpm/internal/imports"
 )
 
 type vendorer struct {
@@ -252,7 +252,7 @@ func Check(c *cfg.Config) error {
 
 // findBareImports walks all vendored JS files and returns bare import specifiers
 // (e.g. "preact/hooks") that are not present in the import map.
-func findBareImports(outDir string, imports map[string]string) map[string][]string {
+func findBareImports(outDir string, importMap map[string]string) map[string][]string {
 	missing := map[string][]string{}
 
 	filepath.Walk(outDir, func(p string, info os.FileInfo, err error) error {
@@ -273,15 +273,11 @@ func findBareImports(outDir string, imports map[string]string) map[string][]stri
 		relPath, _ := filepath.Rel(outDir, p)
 		relPath = filepath.ToSlash(relPath)
 
-		for _, m := range allImportRe.FindAllStringSubmatch(string(data), -1) {
-			spec := m[1]
-			if spec == "" {
-				spec = m[2]
-			}
+		for _, spec := range imports.Scan(string(data)) {
 			if strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") || strings.Contains(spec, "://") {
 				continue
 			}
-			if _, ok := imports[spec]; !ok {
+			if _, ok := importMap[spec]; !ok {
 				missing[spec] = append(missing[spec], relPath)
 			}
 		}
@@ -347,10 +343,9 @@ func findImportChain(outDir, start, target string) []string {
 			continue
 		}
 
-		for _, m := range relImportRe.FindAllStringSubmatch(string(data), -1) {
-			spec := m[1]
-			if spec == "" {
-				spec = m[2]
+		for _, spec := range imports.Scan(string(data)) {
+			if !strings.HasPrefix(spec, ".") {
+				continue
 			}
 			depPath := path.Join(path.Dir(cur.relPath), spec)
 			if !visited[filepath.Clean(filepath.Join(outDir, depPath))] {
@@ -364,12 +359,6 @@ func findImportChain(outDir, start, target string) []string {
 
 	return nil
 }
-
-// relImportRe matches import/export statements and dynamic import() calls with relative path specifiers.
-var relImportRe = regexp.MustCompile(`(?:\b(?:import|export)\s*(?:[^"']*\bfrom\s*|)["'](\.[^"']+)["']|\bimport\s*\(\s*["'](\.[^"']+)["']\s*\))`)
-
-// allImportRe matches all import/export specifiers and dynamic import() calls.
-var allImportRe = regexp.MustCompile(`(?:\b(?:import|export)\s*(?:[^"']*\bfrom\s*|)["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\))`)
 
 // readEntryPoints reads importmap.json from the vendor directory and returns a
 // map of import key -> relative path within outDir. Since vendor rewrites all
@@ -417,44 +406,25 @@ func walkImports(outDir, relPath string, reachable map[string]bool) error {
 		return fmt.Errorf("reading %s: %w", absPath, err)
 	}
 
-	matches := relImportRe.FindAllStringSubmatch(string(data), -1)
-	for _, m := range matches {
-		depRel := m[1]
-		if depRel == "" {
-			depRel = m[2]
+	for _, spec := range imports.Scan(string(data)) {
+		if !strings.HasPrefix(spec, ".") {
+			continue
 		}
 		// Resolve relative to the current file's directory
-		depPath := path.Join(path.Dir(relPath), depRel)
+		depPath := path.Join(path.Dir(relPath), spec)
 		if err := walkImports(outDir, depPath, reachable); err != nil {
 			return err
 		}
 	}
 
 	// Mark source maps referenced by //# sourceMappingURL=... as reachable
-	for _, m := range sourceMappingRe.FindAllStringSubmatch(string(data), -1) {
-		mapRel := m[2]
-		if strings.HasPrefix(mapRel, "data:") {
-			continue
-		}
+	for _, mapRel := range imports.ScanSourceMaps(string(data)) {
 		mapPath := filepath.Clean(filepath.Join(outDir, path.Join(path.Dir(relPath), mapRel)))
 		reachable[mapPath] = true
 	}
 
 	return nil
 }
-
-// importRe matches import/export statements and dynamic import() calls with origin-relative or relative path specifiers.
-// For static imports: captures the statement prefix (group 1), quote char (group 2), path (group 3), closing quote (group 4).
-// For dynamic imports: captures "import(" prefix (group 5), quote char (group 6), path (group 7), closing quote + ")" (group 8).
-var importRe = regexp.MustCompile(`(\b(?:import|export)\s*(?:[^"']*\bfrom\s*|))(["'])((?:[a-zA-Z]+://|/|\.\.?/)[^"']+)(["'])|(\bimport\s*\(\s*)(["'])((?:[a-zA-Z]+://|/|\.\.?/)[^"']+)(["']\s*\))`)
-
-// typeImportRe matches `import type ... from "spec"` and `export type ... from "spec"`
-// statements. esbuild elides these from its output before OnResolve runs, so we
-// can't rely on the parser to discover the deps — we have to find them ourselves.
-var typeImportRe = regexp.MustCompile(`(?m)(?:^|[\s;])(?:import|export)\s+type\b[^"';\n]*?["']([^"']+)["']`)
-
-// sourceMappingRe matches //# sourceMappingURL=... comments.
-var sourceMappingRe = regexp.MustCompile(`(//[#@]\s*sourceMappingURL\s*=\s*)(\S+)`)
 
 // fetch downloads a URL, follows x-esm-path shims, caches the bytes in memory,
 // and recursively enumerates the URLs referenced by the file. It returns the
@@ -608,11 +578,7 @@ func (v *vendorer) discover(u *url.URL, f *fetched) error {
 // discoverSourceMap follows a //# sourceMappingURL= comment, fetching the
 // referenced map and recording it on f.sourceMap. Inline data: URLs are skipped.
 func (v *vendorer) discoverSourceMap(u *url.URL, f *fetched) {
-	for _, m := range sourceMappingRe.FindAllStringSubmatch(string(f.content), -1) {
-		mapPath := m[2]
-		if strings.HasPrefix(mapPath, "data:") {
-			continue
-		}
+	for _, mapPath := range imports.ScanSourceMaps(string(f.content)) {
 		ref, err := url.Parse(mapPath)
 		if err != nil {
 			continue
@@ -745,23 +711,6 @@ func resolveCandidates(depURL string, parentLoader api.Loader) []string {
 	return out
 }
 
-// resolveSpec returns the absolute URL for an import spec resolved against the
-// importing file's URL. Bare specifiers (no scheme, no leading "/", "./", or
-// "../") return "" — callers should treat those as import-map entries.
-func resolveSpec(base *url.URL, spec string) string {
-	switch {
-	case strings.Contains(spec, "://"):
-		return spec
-	case strings.HasPrefix(spec, "/"), strings.HasPrefix(spec, "./"), strings.HasPrefix(spec, "../"):
-		ref, err := url.Parse(spec)
-		if err != nil {
-			return ""
-		}
-		return base.ResolveReference(ref).String()
-	}
-	return ""
-}
-
 // attachTypesHeader follows the x-typescript-types header on resp and records
 // the result on f.typesRef. The header is authoritative, so it overwrites any
 // sidecar already found. Errors are non-fatal — a warning is emitted.
@@ -844,7 +793,7 @@ func (v *vendorer) discoverESBuild(u *url.URL, f *fetched) error {
 					}
 
 					spec := args.Path
-					depURL := resolveSpec(u, spec)
+					depURL := imports.Resolve(u, spec)
 					if depURL == "" {
 						// bare specifier - findBareImports will warn later
 						return external, nil
@@ -873,12 +822,11 @@ func (v *vendorer) discoverESBuild(u *url.URL, f *fetched) error {
 // recorded on f.deps so the file ends up on disk for TS to resolve against;
 // the .ts source itself is written verbatim so the original specs stay intact.
 func (v *vendorer) discoverTypeImports(u *url.URL, f *fetched) {
-	for _, groups := range typeImportRe.FindAllStringSubmatch(string(f.content), -1) {
-		spec := groups[1]
+	for _, spec := range imports.ScanTypes(string(f.content)) {
 		if _, seen := f.deps[spec]; seen {
 			continue
 		}
-		depURL := resolveSpec(u, spec)
+		depURL := imports.Resolve(u, spec)
 		if depURL == "" {
 			continue
 		}
@@ -888,24 +836,20 @@ func (v *vendorer) discoverTypeImports(u *url.URL, f *fetched) {
 	}
 }
 
-// discoverRegex enumerates imports in non-script files (notably .d.ts) using a
-// regex. Bare specifiers are skipped because importRe matches only paths that
-// begin with a scheme, "/", "./", or "../".
+// discoverRegex enumerates imports in non-script files (notably .d.ts) by
+// scanning the source. Bare specifiers are skipped because imports.Resolve
+// returns "" for anything without a scheme or a "/", "./", "../" prefix.
 func (v *vendorer) discoverRegex(u *url.URL, f *fetched) {
 	parentLoader := api.LoaderNone
 	if strings.HasSuffix(strings.ToLower(f.filename), ".d.ts") {
 		parentLoader = api.LoaderTS
 	}
 
-	for _, groups := range importRe.FindAllStringSubmatch(string(f.content), -1) {
-		spec := groups[3]
-		if spec == "" {
-			spec = groups[7]
-		}
+	for _, spec := range imports.Scan(string(f.content)) {
 		if _, seen := f.deps[spec]; seen {
 			continue
 		}
-		depURL := resolveSpec(u, spec)
+		depURL := imports.Resolve(u, spec)
 		if depURL == "" {
 			continue
 		}
@@ -1011,22 +955,12 @@ func rewriteScriptImports(content string, rewrites map[string]string) string {
 }
 
 // rewriteTextImports replaces dep specifiers in non-script text files (notably
-// .d.ts) using importRe, so only genuine import/export specifiers are rewritten
-// rather than every matching string in the file.
+// .d.ts), touching only genuine import/export specifiers rather than every
+// matching string in the file. Specifiers not in rewrites are left as-is.
 func rewriteTextImports(content string, rewrites map[string]string) string {
-	return importRe.ReplaceAllStringFunc(content, func(match string) string {
-		groups := importRe.FindStringSubmatch(match)
-		var prefix, quote, impPath, suffix string
-		if groups[1] != "" {
-			prefix, quote, impPath, suffix = groups[1], groups[2], groups[3], groups[4]
-		} else {
-			prefix, quote, impPath, suffix = groups[5], groups[6], groups[7], groups[8]
-		}
-		rewritten, ok := rewrites[impPath]
-		if !ok {
-			return match
-		}
-		return prefix + quote + rewritten + suffix
+	return imports.Rewrite(content, func(spec string) (string, bool) {
+		rewritten, ok := rewrites[spec]
+		return rewritten, ok
 	})
 }
 
@@ -1037,12 +971,8 @@ func (v *vendorer) rewriteSourceMapURL(content, currentDir, sourceMap string) st
 	if !ok {
 		return content
 	}
-	return sourceMappingRe.ReplaceAllStringFunc(content, func(match string) string {
-		groups := sourceMappingRe.FindStringSubmatch(match)
-		if strings.HasPrefix(groups[2], "data:") {
-			return match
-		}
-		return groups[1] + relPath(currentDir, df.vendorRel)
+	return imports.RewriteSourceMap(content, func(string) string {
+		return relPath(currentDir, df.vendorRel)
 	})
 }
 
