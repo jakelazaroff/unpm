@@ -10,14 +10,15 @@ import (
 	"os"
 
 	"github.com/jakelazaroff/unpm/internal/cli"
+	"github.com/jakelazaroff/unpm/internal/inspect"
 	"github.com/jakelazaroff/unpm/internal/unpm"
 )
 
 func main() {
 	app := cli.App{
 		Vendor: unpm.Vendor,
-		Check:  unpm.Check,
-		Why:    unpm.Why,
+		Check:  inspect.Check,
+		Why:    inspect.Why,
 	}
 
 	os.Exit(app.Run(os.Args, os.Stdout, os.Stderr))
