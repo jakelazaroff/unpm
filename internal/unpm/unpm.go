@@ -41,19 +41,37 @@ type vendorer struct {
 // skip rather than a hard failure.
 var errSkip = errors.New("unsupported response")
 
-// fetched is the cached result of pass 1 for a single URL.
+// fetched is the cached result of pass 1 for a single URL. The fields above the
+// blank line describe the runtime artifact written to disk; the ones below point
+// at where the file's types live (or, for transpiled TS, carry the original
+// source so it can be written back out).
 type fetched struct {
-	url          *url.URL
-	content      []byte
-	filename     string
-	vendorRel    string // path on disk relative to v.config.Unpm.Out (host/dir/filename)
-	loader       api.Loader
-	deps         map[string]string // import spec as written in source -> canonical dep URL
-	sourceMap    string            // canonical URL of referenced source map, or ""
-	typesURL     string            // canonical URL of x-typescript-types, or ""
-	sidecar      string            // canonical URL of sidecar .d.ts found alongside, or ""
-	typesContent []byte            // original .ts/.tsx source (kept for type-checking when transpiled to .js)
-	typesRel     string            // vendor path for typesContent (the original .ts/.tsx file)
+	url       *url.URL
+	content   []byte
+	filename  string
+	vendorRel string // path on disk relative to v.config.Unpm.Out (host/dir/filename)
+	loader    api.Loader
+	deps      map[string]string // import spec as written in source -> canonical dep URL
+	sourceMap string            // canonical URL of referenced source map, or ""
+
+	typesURL string         // canonical URL of x-typescript-types, or ""
+	sidecar  string         // canonical URL of sidecar .d.ts found alongside, or ""
+	types    *typesArtifact // original TS source, set when the runtime artifact was transpiled to JS
+}
+
+// typesArtifact is the original .ts/.tsx source of a file that was transpiled to
+// JS for the runtime. It is written to disk alongside the generated JS so that
+// TypeScript resolves the real source for type-checking rather than the emitted
+// JavaScript.
+type typesArtifact struct {
+	content []byte
+	rel     string // vendor path for the original source
+}
+
+// isScript reports whether the file is a script esbuild can parse (as opposed to
+// a .d.ts declaration, source map, or other non-script asset).
+func (f *fetched) isScript() bool {
+	return f.loader != api.LoaderNone
 }
 
 func Vendor(c *cfg.Config) ([]string, error) {
@@ -109,8 +127,8 @@ func Vendor(c *cfg.Config) ([]string, error) {
 		}
 		if tf, ok := v.fetched[typesCanon]; ok && typesCanon != entry {
 			typesMap[key] = "./" + tf.vendorRel
-		} else if f.typesRel != "" {
-			typesMap[key] = "./" + f.typesRel
+		} else if f.types != nil {
+			typesMap[key] = "./" + f.types.rel
 		} else {
 			typesMap[key] = "./" + f.vendorRel
 		}
@@ -543,36 +561,8 @@ func (v *vendorer) fetch(rawURL string) (canon string, err error) {
 	}
 	v.fetched[canon] = f
 
-	switch {
-	case f.loader != api.LoaderNone:
-		if err := v.discoverESBuild(u, f); err != nil {
-			return "", fmt.Errorf("discovering imports in %s: %w", rawURL, err)
-		}
-		if f.loader == api.LoaderTS || f.loader == api.LoaderTSX {
-			v.discoverTypeImports(u, f)
-		}
-	case strings.HasSuffix(strings.ToLower(filename), ".map"):
-	default:
-		v.discoverRegex(u, f)
-	}
-
-	if !strings.HasSuffix(strings.ToLower(filename), ".map") {
-		for _, m := range sourceMappingRe.FindAllStringSubmatch(string(body), -1) {
-			mapPath := m[2]
-			if strings.HasPrefix(mapPath, "data:") {
-				continue
-			}
-			ref, err := url.Parse(mapPath)
-			if err != nil {
-				continue
-			}
-			mapURL := u.ResolveReference(ref).String()
-			if smCanon, err := v.fetch(mapURL); err != nil {
-				v.warnings = append(v.warnings, fmt.Sprintf("failed to download source map %s: %v", mapURL, err))
-			} else {
-				f.sourceMap = smCanon
-			}
-		}
+	if err := v.discover(u, f); err != nil {
+		return "", fmt.Errorf("discovering imports in %s: %w", rawURL, err)
 	}
 
 	v.attachTypesHeader(u, resp, rawURL, f)
@@ -585,32 +575,93 @@ func (v *vendorer) fetch(rawURL string) (canon string, err error) {
 		}
 	}
 
-	// Transpile TS to JS for the runtime artifact; the original .ts content
-	// is kept as a sibling on disk so TS can still resolve it for type-checking.
-	if f.loader == api.LoaderTS || f.loader == api.LoaderTSX {
-		res := api.Transform(string(body), api.TransformOptions{
-			Loader:     f.loader,
-			Sourcefile: u.String(),
-		})
-		if len(res.Errors) > 0 {
-			return "", fmt.Errorf("transpiling %s: %s", rawURL, res.Errors[0].Text)
-		}
-
-		f.typesContent = body
-		f.typesRel = f.vendorRel
-
-		origExt := path.Ext(f.filename)
-		newExt := ".js"
-		if strings.EqualFold(origExt, ".mts") {
-			newExt = ".mjs"
-		}
-		f.filename = strings.TrimSuffix(f.filename, origExt) + newExt
-		f.vendorRel = path.Join(path.Dir(f.vendorRel), f.filename)
-		f.content = res.Code
-		f.loader = api.LoaderJS
+	if err := v.transpile(f); err != nil {
+		return "", fmt.Errorf("transpiling %s: %w", rawURL, err)
 	}
 
 	return canon, nil
+}
+
+// discover enumerates the URLs a fetched file references — its imports and any
+// source map — fetching each and recording the edges on f. Routing is internal:
+// script files go through esbuild's parser (plus a regex pass for the
+// `import type` statements esbuild elides), .d.ts and other text files use a
+// regex, and source maps reference nothing of their own.
+func (v *vendorer) discover(u *url.URL, f *fetched) error {
+	switch {
+	case f.isScript():
+		if err := v.discoverESBuild(u, f); err != nil {
+			return err
+		}
+		if f.loader == api.LoaderTS || f.loader == api.LoaderTSX {
+			v.discoverTypeImports(u, f)
+		}
+	case isSourceMap(f.filename):
+		return nil
+	default:
+		v.discoverRegex(u, f)
+	}
+
+	v.discoverSourceMap(u, f)
+	return nil
+}
+
+// discoverSourceMap follows a //# sourceMappingURL= comment, fetching the
+// referenced map and recording it on f.sourceMap. Inline data: URLs are skipped.
+func (v *vendorer) discoverSourceMap(u *url.URL, f *fetched) {
+	for _, m := range sourceMappingRe.FindAllStringSubmatch(string(f.content), -1) {
+		mapPath := m[2]
+		if strings.HasPrefix(mapPath, "data:") {
+			continue
+		}
+		ref, err := url.Parse(mapPath)
+		if err != nil {
+			continue
+		}
+		mapURL := u.ResolveReference(ref).String()
+		if smCanon, err := v.fetch(mapURL); err != nil {
+			v.warnings = append(v.warnings, fmt.Sprintf("failed to download source map %s: %v", mapURL, err))
+		} else {
+			f.sourceMap = smCanon
+		}
+	}
+}
+
+// transpile converts a TS/TSX runtime artifact to JS in place, updating
+// f.filename, f.vendorRel, f.content and f.loader. The original source is stashed
+// on f.types so writeOne can emit it alongside the generated JS for TypeScript to
+// type-check against. Non-TS files are left untouched.
+func (v *vendorer) transpile(f *fetched) error {
+	if f.loader != api.LoaderTS && f.loader != api.LoaderTSX {
+		return nil
+	}
+
+	res := api.Transform(string(f.content), api.TransformOptions{
+		Loader:     f.loader,
+		Sourcefile: f.url.String(),
+	})
+	if len(res.Errors) > 0 {
+		return errors.New(res.Errors[0].Text)
+	}
+
+	f.types = &typesArtifact{content: f.content, rel: f.vendorRel}
+
+	origExt := path.Ext(f.filename)
+	newExt := ".js"
+	if strings.EqualFold(origExt, ".mts") {
+		newExt = ".mjs"
+	}
+	f.filename = strings.TrimSuffix(f.filename, origExt) + newExt
+	f.vendorRel = path.Join(path.Dir(f.vendorRel), f.filename)
+	f.content = res.Code
+	f.loader = api.LoaderJS
+
+	return nil
+}
+
+// isSourceMap reports whether filename is a .map sidecar.
+func isSourceMap(filename string) bool {
+	return strings.HasSuffix(strings.ToLower(filename), ".map")
 }
 
 // resolveAndFetch fetches depURL, falling back to extension-search candidates
@@ -650,55 +701,46 @@ func (v *vendorer) resolveAndFetch(depURL string, parentLoader api.Loader) (stri
 	return "", err
 }
 
+// candidateExts is the full matrix of extension-search fallbacks, keyed by the
+// importing file's loader and then by the extension of the import as written.
+// Each value is the list of suffixes to try in place of that extension (the
+// extension is trimmed off first, so "" means an extensionless import that gets
+// bundler-style and /index.* expansion). The TS and TSX loaders share tsExts.
+var (
+	tsExts = map[string][]string{
+		".js":  {".ts", ".tsx", ".d.ts"},
+		".mjs": {".mts", ".d.mts"},
+		".jsx": {".tsx"},
+		"":     {".ts", ".tsx", ".d.ts", "/index.ts", "/index.tsx", "/index.d.ts", ".js", ".mjs", "/index.js", "/index.mjs"},
+	}
+	candidateExts = map[api.Loader]map[string][]string{
+		api.LoaderTS:  tsExts,
+		api.LoaderTSX: tsExts,
+		api.LoaderJS: {
+			"": {".js", ".mjs", "/index.js", "/index.mjs"},
+		},
+	}
+)
+
 // resolveCandidates returns the URLs to try for an extension-less or
-// TS-source-style import that couldn't be fetched as-is. The candidate set
-// depends on the parent file's loader: JS source gets bundler-style .js/.mjs
-// and /index.* variants; TS source gets the TS extensions plus those JS
-// fallbacks.
+// TS-source-style import that couldn't be fetched as-is, per the candidateExts
+// matrix for the importing file's loader.
 func resolveCandidates(depURL string, parentLoader api.Loader) []string {
 	u, err := url.Parse(depURL)
 	if err != nil {
 		return nil
 	}
 	ext := strings.ToLower(path.Ext(u.Path))
-	base := strings.TrimSuffix(u.Path, ext)
-
-	jsBare := []string{
-		u.Path + ".js", u.Path + ".mjs",
-		u.Path + "/index.js", u.Path + "/index.mjs",
-	}
-	tsBare := []string{
-		u.Path + ".ts", u.Path + ".tsx", u.Path + ".d.ts",
-		u.Path + "/index.ts", u.Path + "/index.tsx", u.Path + "/index.d.ts",
-	}
-
-	var paths []string
-	switch parentLoader {
-	case api.LoaderTS, api.LoaderTSX:
-		switch ext {
-		case ".js":
-			paths = []string{base + ".ts", base + ".tsx", base + ".d.ts"}
-		case ".mjs":
-			paths = []string{base + ".mts", base + ".d.mts"}
-		case ".jsx":
-			paths = []string{base + ".tsx"}
-		case "":
-			paths = append(append([]string{}, tsBare...), jsBare...)
-		}
-	case api.LoaderJS:
-		if ext == "" {
-			paths = jsBare
-		}
-	}
-
-	if len(paths) == 0 {
+	suffixes := candidateExts[parentLoader][ext]
+	if len(suffixes) == 0 {
 		return nil
 	}
 
-	out := make([]string, 0, len(paths))
-	for _, p := range paths {
+	base := strings.TrimSuffix(u.Path, ext)
+	out := make([]string, 0, len(suffixes))
+	for _, s := range suffixes {
 		nu := *u
-		nu.Path = p
+		nu.Path = base + s
 		out = append(out, nu.String())
 	}
 	return out
@@ -883,7 +925,7 @@ func (v *vendorer) writeOne(canon string) error {
 	}
 
 	var content []byte
-	if strings.HasSuffix(strings.ToLower(f.filename), ".map") {
+	if isSourceMap(f.filename) {
 		content = f.content
 	} else {
 		content = v.rewrite(f)
@@ -894,8 +936,8 @@ func (v *vendorer) writeOne(canon string) error {
 
 	// The original .ts/.tsx source is written alongside the transpiled .js so
 	// TypeScript can find it for type-checking via sibling resolution.
-	if f.typesContent != nil && f.typesRel != "" && f.typesRel != f.vendorRel {
-		return v.writeFile(canon, f.typesRel, f.typesContent)
+	if f.types != nil && f.types.rel != f.vendorRel {
+		return v.writeFile(canon, f.types.rel, f.types.content)
 	}
 	return nil
 }
@@ -921,7 +963,9 @@ func (v *vendorer) writeFile(canon, rel string, content []byte) error {
 }
 
 // rewrite substitutes import specs and the sourceMappingURL in f.content with
-// paths relative to f.vendorRel using the vendor locations of f's deps.
+// paths relative to f.vendorRel using the vendor locations of f's deps. Script
+// files and text files (notably .d.ts) need different substitution strategies,
+// so the two are handled by separate functions.
 func (v *vendorer) rewrite(f *fetched) []byte {
 	currentDir := path.Dir(f.vendorRel)
 
@@ -931,72 +975,86 @@ func (v *vendorer) rewrite(f *fetched) []byte {
 		if !ok {
 			continue
 		}
-		rel, _ := filepath.Rel(currentDir, df.vendorRel)
-		rel = filepath.ToSlash(rel)
-		if !strings.HasPrefix(rel, ".") {
-			rel = "./" + rel
-		}
-		rewrites[spec] = rel
+		rewrites[spec] = relPath(currentDir, df.vendorRel)
 	}
 
 	var result string
-	if f.loader != api.LoaderNone {
-		pairs := make([]string, 0, len(rewrites)*6)
-		for spec, rewritten := range rewrites {
-			if spec == rewritten {
-				continue
-			}
-			pairs = append(pairs,
-				`"`+spec+`"`, `"`+rewritten+`"`,
-				`'`+spec+`'`, `'`+rewritten+`'`,
-				"`"+spec+"`", "`"+rewritten+"`",
-			)
-		}
-		result = strings.NewReplacer(pairs...).Replace(string(f.content))
+	if f.isScript() {
+		result = rewriteScriptImports(string(f.content), rewrites)
 	} else {
-		// .d.ts and other text files: regex-based per-match substitution
-		result = importRe.ReplaceAllStringFunc(string(f.content), func(match string) string {
-			groups := importRe.FindStringSubmatch(match)
-			var prefix, quote, impPath, suffix string
-			if groups[1] != "" {
-				prefix = groups[1]
-				quote = groups[2]
-				impPath = groups[3]
-				suffix = groups[4]
-			} else {
-				prefix = groups[5]
-				quote = groups[6]
-				impPath = groups[7]
-				suffix = groups[8]
-			}
-			rewritten, ok := rewrites[impPath]
-			if !ok {
-				return match
-			}
-			return prefix + quote + rewritten + suffix
-		})
+		result = rewriteTextImports(string(f.content), rewrites)
 	}
 
 	if f.sourceMap != "" {
-		result = sourceMappingRe.ReplaceAllStringFunc(result, func(match string) string {
-			groups := sourceMappingRe.FindStringSubmatch(match)
-			if strings.HasPrefix(groups[2], "data:") {
-				return match
-			}
-			df, ok := v.fetched[f.sourceMap]
-			if !ok {
-				return match
-			}
-			rel, _ := filepath.Rel(currentDir, df.vendorRel)
-			rel = filepath.ToSlash(rel)
-			if !strings.HasPrefix(rel, ".") {
-				rel = "./" + rel
-			}
-			return groups[1] + rel
-		})
+		result = v.rewriteSourceMapURL(result, currentDir, f.sourceMap)
 	}
 
 	return []byte(result)
+}
+
+// rewriteScriptImports replaces dep specifiers in JS source by literal string
+// substitution across the three quote styles. esbuild has already normalized the
+// source, so each specifier appears verbatim and a blunt replace is safe.
+func rewriteScriptImports(content string, rewrites map[string]string) string {
+	pairs := make([]string, 0, len(rewrites)*6)
+	for spec, rewritten := range rewrites {
+		if spec == rewritten {
+			continue
+		}
+		pairs = append(pairs,
+			`"`+spec+`"`, `"`+rewritten+`"`,
+			`'`+spec+`'`, `'`+rewritten+`'`,
+			"`"+spec+"`", "`"+rewritten+"`",
+		)
+	}
+	return strings.NewReplacer(pairs...).Replace(content)
+}
+
+// rewriteTextImports replaces dep specifiers in non-script text files (notably
+// .d.ts) using importRe, so only genuine import/export specifiers are rewritten
+// rather than every matching string in the file.
+func rewriteTextImports(content string, rewrites map[string]string) string {
+	return importRe.ReplaceAllStringFunc(content, func(match string) string {
+		groups := importRe.FindStringSubmatch(match)
+		var prefix, quote, impPath, suffix string
+		if groups[1] != "" {
+			prefix, quote, impPath, suffix = groups[1], groups[2], groups[3], groups[4]
+		} else {
+			prefix, quote, impPath, suffix = groups[5], groups[6], groups[7], groups[8]
+		}
+		rewritten, ok := rewrites[impPath]
+		if !ok {
+			return match
+		}
+		return prefix + quote + rewritten + suffix
+	})
+}
+
+// rewriteSourceMapURL points the //# sourceMappingURL comment at the vendored
+// copy of the map, leaving inline data: URLs untouched.
+func (v *vendorer) rewriteSourceMapURL(content, currentDir, sourceMap string) string {
+	df, ok := v.fetched[sourceMap]
+	if !ok {
+		return content
+	}
+	return sourceMappingRe.ReplaceAllStringFunc(content, func(match string) string {
+		groups := sourceMappingRe.FindStringSubmatch(match)
+		if strings.HasPrefix(groups[2], "data:") {
+			return match
+		}
+		return groups[1] + relPath(currentDir, df.vendorRel)
+	})
+}
+
+// relPath expresses target relative to fromDir in slash form, prefixing "./" so
+// it never reads as a bare specifier.
+func relPath(fromDir, target string) string {
+	rel, _ := filepath.Rel(fromDir, target)
+	rel = filepath.ToSlash(rel)
+	if !strings.HasPrefix(rel, ".") {
+		rel = "./" + rel
+	}
+	return rel
 }
 
 func writeImportMap(outDir string, rewritten map[string]string, verbose bool) error {
